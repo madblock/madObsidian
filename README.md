@@ -1,9 +1,8 @@
 # madObsidian
 
 madObsidian is the starting point for a personal media archive and Obsidian
-integration. Stage 1 provides a local importer for preserving original files
-with UUIDs and metadata. It uses Python's standard library and does not inspect
-file contents to identify media types.
+integration. The importer preserves original files with UUIDs and metadata,
+and creates WebP previews for sufficiently large raster images.
 
 ## Development setup
 
@@ -39,8 +38,23 @@ filename using `mimetypes`; unknown types are recorded as
 Files are copied into a temporary directory under `objects`, verified by
 SHA-256, and accompanied by metadata before the directory is renamed to its
 UUID. Failed imports are not reported as completed objects. The importer does
-not overwrite existing objects or modify source files. The application uses
-only Python's standard library.
+not overwrite existing objects or modify source files.
+
+Images of 256,000 bytes or more receive a WebP preview at
+`previews/preview.webp` inside the object directory. Previews are oriented
+according to EXIF, preserve aspect ratio, are not enlarged, and fit within 960
+pixels on their longest side. Transparency is retained when supported by the
+source and WebP encoder. Smaller images and non-image files have no preview.
+The preview watermark shows the original filename, size in decimal MB, and
+orientation-corrected resolution. Preview generation is part of the temporary
+object import: if generation fails for an eligible image, the object is not
+published.
+
+Pillow is the only runtime dependency. The bundled DejaVu Sans font is from
+DejaVu Fonts 2.37; its license is included in
+`src/madobsidian/assets/DEJAVU-LICENSE.txt`. The DejaVu license permits
+redistribution subject to including its copyright and permission notices
+[as stated in the upstream license](https://github.com/dejavu-fonts/dejavu-fonts/blob/master/LICENSE).
 
 `verify` checks each UUID object directory against its metadata and original
 file without changing the archive. `rebuild-index` regenerates the disposable
