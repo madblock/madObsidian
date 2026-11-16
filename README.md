@@ -23,6 +23,8 @@ madObsidian --help
 madObsidian --version
 madObsidian status
 madObsidian import <file-or-directory> <archive-directory>
+madObsidian verify <archive-directory>
+madObsidian rebuild-index <archive-directory>
 python -m unittest discover -s tests -v
 ```
 
@@ -39,3 +41,12 @@ SHA-256, and accompanied by metadata before the directory is renamed to its
 UUID. Failed imports are not reported as completed objects. The importer does
 not overwrite existing objects or modify source files. The application uses
 only Python's standard library.
+
+`verify` checks each UUID object directory against its metadata and original
+file without changing the archive. `rebuild-index` regenerates the disposable
+`index.json` from valid per-object metadata. The index contains version `1` and
+an `objects` list; each entry has a `metadata` record and an archive-relative
+`path`. If any object is invalid, the existing index is left unchanged. The
+per-object `metadata.json` files remain authoritative, so the index can be
+deleted and rebuilt later. Abandoned `.incomplete-` directories are reported
+for investigation and are never indexed.

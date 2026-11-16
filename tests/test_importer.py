@@ -9,7 +9,8 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from madobsidian.importer import ImportError, import_path
+from madobsidian.importer import ImportError, _import_file, import_path
+from madobsidian.archive import scan_archive
 from madobsidian.cli import main
 
 
@@ -119,6 +120,44 @@ class ImporterTests(unittest.TestCase):
             import_path(source, self.archive)
         self.assertEqual(source.read_text(encoding="utf-8"), "source")
         self.assertFalse((self.archive / "objects").exists())
+
+    def test_uppercase_reserved_metadata_filename_is_rejected(self) -> None:
+        source = self.root / "METADATA.JSON"
+        source.write_text("source", encoding="utf-8")
+        with self.assertRaisesRegex(ImportError, "reserved metadata"):
+            import_path(source, self.archive)
+        self.assertEqual(source.read_text(encoding="utf-8"), "source")
+        self.assertFalse((self.archive / "objects").exists())
+
+    def test_windows_drive_qualified_names_are_rejected_on_all_platforms(self) -> None:
+        class SourcePath:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def is_symlink(self) -> bool:
+                return False
+
+            def is_file(self) -> bool:
+                return True
+
+            def __str__(self) -> str:
+                return self.name
+
+        with tempfile.TemporaryDirectory() as temporary:
+            objects = Path(temporary) / "objects"
+            for name in ("C:note.txt", r"C:\note.txt"):
+                with self.subTest(name=name), self.assertRaisesRegex(ImportError, "original_filename"):
+                    _import_file(SourcePath(name), objects)
+            self.assertFalse(objects.exists())
+
+    def test_embedded_double_dot_filename_imports_and_verifies(self) -> None:
+        source = self.root / "safe..name.txt"
+        source.write_bytes(b"accepted filename")
+        results = import_path(source, self.archive)
+        self.assertEqual(len(results), 1)
+        report = scan_archive(self.archive)
+        self.assertEqual(len(report.objects), 1)
+        self.assertEqual(report.problems, ())
 
     def test_cli_end_to_end_batch_preserves_every_file_byte_for_byte(self) -> None:
         source_dir = self.root / "batch"

@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from madobsidian.filenames import filename_problem
+
 
 @dataclass(frozen=True)
 class ImportMetadata:
@@ -63,8 +65,9 @@ def _import_file(source: Path, objects: Path) -> ImportResult:
         raise ImportError(f"Symbolic links cannot be imported: {source}")
     if not source.is_file():
         raise ImportError(f"Not a regular file: {source}")
-    if source.name == "metadata.json":
-        raise ImportError("A source named 'metadata.json' conflicts with the reserved metadata filename")
+    invalid_filename = filename_problem(source.name)
+    if invalid_filename:
+        raise ImportError(invalid_filename)
     source_hash = _sha256(source)
     source_size = source.stat().st_size
     objects.mkdir(parents=True, exist_ok=True)
