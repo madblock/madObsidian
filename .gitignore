@@ -25,3 +25,7 @@ dist/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local FFmpeg build and test artifacts
+ffmpeg-master-latest-win64-gpl/
+bframe-test.mp4

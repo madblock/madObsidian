@@ -1,0 +1,490 @@
+"""Generate full-length, watermarked MP4 previews for imported videos."""
+
+from __future__ import annotations
+
+import json
+import math
+import mimetypes
+import os
+import shutil
+import statistics
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from fractions import Fraction
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, ImageDraw, ImageFont
+
+
+VIDEO_PREVIEW_THRESHOLD_BYTES = 256_000
+MAX_VIDEO_PREVIEW_DIMENSION = 400
+VIDEO_EXTENSIONS = frozenset(
+    {
+        ".3g2", ".3gp", ".asf", ".avi", ".f4v", ".flv", ".m2t", ".m2ts",
+        ".m2v", ".m4v", ".mkv", ".mov", ".mp4", ".mpe", ".mpeg", ".mpg",
+        ".mpv", ".mts", ".mxf", ".ogv", ".ts", ".vob", ".webm", ".wmv",
+    }
+)
+# On the supplied Windows FFmpeg build, the integration experiment measured
+# identical relative source/output PTS and frame intervals (0 s maximum error)
+# with both `filter` and `demux`; `filter` explicitly selects the filtergraph TB.
+ENCODER_TIME_BASE = "filter"
+_FONT_PATH = Path(__file__).parent / "assets" / "DejaVuSans.ttf"
+
+
+class VideoPreviewError(OSError):
+    """Raised when an eligible video cannot be inspected or previewed."""
+
+
+@dataclass(frozen=True)
+class VideoInfo:
+    streams: tuple[dict[str, Any], ...]
+    video: dict[str, Any]
+    audio: dict[str, Any] | None
+    video_time_base: Fraction
+    presentation_duration: Fraction
+    display_width: int
+    display_height: int
+
+
+@dataclass(frozen=True)
+class FrameTimeline:
+    timestamps: tuple[Fraction, ...]
+    intervals: tuple[Fraction, ...]
+    frame_count: int
+    variable_frame_rate: bool
+
+
+def is_video_candidate(filename: str, size_bytes: int) -> bool:
+    """Check the threshold and both MIME and extension-based video hints."""
+    if size_bytes < VIDEO_PREVIEW_THRESHOLD_BYTES:
+        return False
+    mime_type, _ = mimetypes.guess_type(filename)
+    return bool(mime_type and mime_type.startswith("video/")) or Path(filename).suffix.casefold() in VIDEO_EXTENSIONS
+
+
+def _executable(env_name: str, default_name: str) -> str:
+    configured = os.environ.get(env_name)
+    if configured:
+        candidate = Path(configured)
+        if candidate.is_file():
+            return str(candidate)
+        located = shutil.which(configured)
+        if located:
+            return located
+        raise VideoPreviewError(f"{env_name} does not name an executable file: {configured}")
+    located = shutil.which(default_name)
+    if not located:
+        raise VideoPreviewError(f"Cannot find {default_name}; configure {env_name} or add it to PATH")
+    return located
+
+
+def _run_json_probe(ffprobe: str, arguments: list[str], path: Path) -> dict[str, Any]:
+    command = [ffprobe, "-v", "error", *arguments, "-of", "json", str(path)]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError as error:
+        raise VideoPreviewError(f"Could not start ffprobe: {error}") from error
+    if completed.returncode:
+        details = completed.stderr.strip()[-2000:]
+        raise VideoPreviewError(f"ffprobe failed for {path.name}: {details or completed.returncode}")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise VideoPreviewError(f"ffprobe returned invalid JSON for {path.name}") from error
+
+
+def _as_fraction(value: Any) -> Fraction | None:
+    if value in (None, "", "N/A"):
+        return None
+    try:
+        return Fraction(str(value))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _stream_duration(stream: dict[str, Any], time_base: Fraction) -> Fraction | None:
+    duration_ts = stream.get("duration_ts")
+    if duration_ts not in (None, "", "N/A"):
+        try:
+            ticks = int(duration_ts)
+            if ticks > 0:
+                return ticks * time_base
+        except (TypeError, ValueError):
+            pass
+    duration = _as_fraction(stream.get("duration"))
+    return duration if duration is not None and duration > 0 else None
+
+
+def _rotation_degrees(video: dict[str, Any]) -> int:
+    for side_data in video.get("side_data_list", ()):
+        if "rotation" in side_data:
+            try:
+                return round(float(side_data["rotation"])) % 360
+            except (TypeError, ValueError):
+                return 0
+    tags = video.get("tags", {})
+    try:
+        return round(float(tags.get("rotate", 0))) % 360
+    except (TypeError, ValueError):
+        return 0
+
+
+def _inspect_video(ffprobe: str, path: Path) -> VideoInfo | None:
+    report = _run_json_probe(ffprobe, ["-show_streams", "-show_format"], path)
+    streams = tuple(report.get("streams", ()))
+    videos = [stream for stream in streams if stream.get("codec_type") == "video"]
+    if not videos:
+        return None
+    video = videos[0]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    audio = audio_streams[0] if audio_streams else None
+    time_base = _as_fraction(video.get("time_base"))
+    if time_base is None or time_base <= 0:
+        raise VideoPreviewError(f"Video stream in {path.name} has no valid time base")
+    try:
+        width, height = int(video["width"]), int(video["height"])
+        if width <= 0 or height <= 0:
+            raise VideoPreviewError(f"Video stream in {path.name} has invalid dimensions")
+    except (KeyError, TypeError, ValueError) as error:
+        raise VideoPreviewError(f"Video stream in {path.name} has invalid dimensions") from error
+    rotation = _rotation_degrees(video)
+    if rotation % 180:
+        width, height = height, width
+    duration = _stream_duration(video, time_base)
+    if duration is None:
+        timeline = _probe_timeline(ffprobe, path, "v:0", time_base)
+        if not timeline.timestamps:
+            raise VideoPreviewError(f"Video stream in {path.name} has no valid presentation timestamps")
+        if not timeline.intervals:
+            raise VideoPreviewError(
+                f"Cannot determine presentation duration for {path.name}"
+            )
+        duration = timeline.timestamps[-1] - timeline.timestamps[0] + timeline.intervals[-1]
+    return VideoInfo(streams, video, audio, time_base, duration, width, height)
+
+
+def _probe_timeline(ffprobe: str, path: Path, selector: str, time_base: Fraction) -> FrameTimeline:
+    command = [
+        ffprobe, "-v", "error", "-select_streams", selector, "-show_frames",
+        "-show_entries", "frame=best_effort_timestamp", "-of", "compact=p=0:nk=0", str(path),
+    ]
+    ticks: list[int] = []
+    invalid = 0
+    try:
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as errors:
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True, encoding="utf-8")
+            assert process.stdout is not None
+            with process.stdout:
+                for line in process.stdout:
+                    fields = line.strip().split("|")
+                    record = dict(field.split("=", 1) for field in fields if "=" in field)
+                    value = record.get("best_effort_timestamp")
+                    try:
+                        ticks.append(int(value))
+                    except (TypeError, ValueError):
+                        invalid += 1
+            return_code = process.wait()
+            errors.seek(0)
+            error_text = errors.read().strip()[-2000:]
+    except OSError as error:
+        raise VideoPreviewError(f"Could not run ffprobe frame scan: {error}") from error
+    if return_code:
+        raise VideoPreviewError(f"ffprobe frame scan failed for {path.name}: {error_text or return_code}")
+    if invalid:
+        raise VideoPreviewError(f"ffprobe reported {invalid} frame(s) without valid presentation timestamps")
+    if not ticks:
+        raise VideoPreviewError(f"ffprobe found no decoded frames in {path.name}")
+
+    if any(right <= left for left, right in zip(ticks, ticks[1:])):
+        raise VideoPreviewError(
+            f"Video stream in {path.name} has non-increasing presentation timestamps"
+        )
+    timestamps = tuple(Fraction(tick) * time_base for tick in ticks)
+    intervals = tuple(right - left for left, right in zip(timestamps, timestamps[1:]))
+    median = statistics.median(intervals) if intervals else None
+    variable = False
+    if median is not None and median > 0:
+        tolerance = max(Fraction(1, 1000), median / 100)
+        variable = any(abs(interval - median) > tolerance for interval in intervals)
+    return FrameTimeline(timestamps, intervals, len(ticks), variable)
+
+
+def _video_duration(info: VideoInfo) -> Fraction:
+    if info.presentation_duration <= 0:
+        raise VideoPreviewError("Video presentation duration is not positive")
+    return info.presentation_duration
+
+
+def _format_duration(seconds: Fraction) -> str:
+    value = float(seconds)
+    hours = int(value // 3600)
+    minutes = int((value % 3600) // 60)
+    remainder = value - hours * 3600 - minutes * 60
+    return f"{hours:02d}:{minutes:02d}:{remainder:05.2f}"
+
+
+def _fit_dimensions(width: int, height: int) -> tuple[int, int, int, int]:
+    scale = min(1.0, MAX_VIDEO_PREVIEW_DIMENSION / max(width, height))
+    content_width = max(1, round(width * scale))
+    content_height = max(1, round(height * scale))
+    canvas_width = content_width + content_width % 2
+    canvas_height = content_height + content_height % 2
+    return content_width, content_height, canvas_width, canvas_height
+
+
+def _wrap_text(text: str, font: ImageFont.FreeTypeFont, width: int) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if font.getlength(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        piece = ""
+        for character in word:
+            if piece and font.getlength(piece + character) > width:
+                lines.append(piece)
+                piece = character
+            else:
+                piece += character
+        current = piece
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def _write_watermark(
+    path: Path,
+    canvas_size: tuple[int, int],
+    filename: str,
+    size_bytes: int,
+    resolution: tuple[int, int],
+    duration: Fraction,
+    timeline: FrameTimeline,
+) -> str:
+    width, height = canvas_size
+    fps = Fraction(timeline.frame_count, 1) / duration
+    detail = (
+        f"{size_bytes / 1_000_000:.1f} MB | {resolution[0]}×{resolution[1]} | "
+        f"{_format_duration(duration)}"
+    )
+    if timeline.variable_frame_rate:
+        detail += f" | {float(fps):.2f} FPS avg"
+    text = f"{filename}\n{detail}"
+    font_size = max(9, min(14, width // 32))
+    font = ImageFont.truetype(str(_FONT_PATH), font_size)
+    padding = 6
+    lines = _wrap_text(text, font, max(1, width - padding * 2))
+    line_height = max(font_size + 2, font.getbbox("Ag")[3] - font.getbbox("Ag")[1] + 2)
+    band_height = min(height, len(lines) * line_height + padding * 2)
+    overlay = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    top = height - band_height
+    draw.rectangle((0, top, width, height), fill=(0, 0, 0, 155))
+    y = top + padding
+    for line in lines:
+        draw.text((padding, y), line, font=font, fill=(255, 255, 255, 255))
+        y += line_height
+    overlay.save(path, format="PNG")
+    return text
+
+
+def _interval_tolerance(source_tb: Fraction, output_tb: Fraction) -> Fraction:
+    return max(Fraction(1, 1000), source_tb + output_tb)
+
+
+def _stream_start(timeline: FrameTimeline) -> Fraction:
+    return timeline.timestamps[0]
+
+
+def _check_output(
+    ffprobe: str,
+    output: Path,
+    source_info: VideoInfo,
+    source_video_timeline: FrameTimeline,
+    source_audio_timeline: FrameTimeline | None,
+    dimensions: tuple[int, int],
+) -> None:
+    result = _run_json_probe(ffprobe, ["-show_streams", "-show_format"], output)
+    streams = tuple(result.get("streams", ()))
+    videos = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if not videos or videos[0].get("codec_name") != "h264":
+        raise VideoPreviewError("Generated preview does not contain an H.264 video stream")
+    output_video = videos[0]
+    if (int(output_video.get("width", 0)), int(output_video.get("height", 0))) != dimensions:
+        raise VideoPreviewError("Generated preview dimensions do not match the requested scale")
+    if max(dimensions) > MAX_VIDEO_PREVIEW_DIMENSION:
+        raise VideoPreviewError("Generated preview exceeds the maximum dimension")
+    if source_info.audio is None:
+        if audios:
+            raise VideoPreviewError("Generated silent-video preview unexpectedly contains audio")
+    elif not audios or audios[0].get("codec_name") != "aac":
+        raise VideoPreviewError("Generated preview is missing the first AAC audio stream")
+
+    output_tb = _as_fraction(output_video.get("time_base"))
+    if output_tb is None:
+        raise VideoPreviewError("Generated preview has no valid video time base")
+    output_video_timeline = _probe_timeline(ffprobe, output, "v:0", output_tb)
+    if output_video_timeline.frame_count != source_video_timeline.frame_count:
+        raise VideoPreviewError(
+            "Generated preview frame count changed "
+            f"({source_video_timeline.frame_count} source, {output_video_timeline.frame_count} output)"
+        )
+    if len(output_video_timeline.intervals) != len(source_video_timeline.intervals):
+        raise VideoPreviewError("Generated preview frame interval count changed")
+    tolerance = _interval_tolerance(source_info.video_time_base, output_tb)
+    for index, (source_interval, output_interval) in enumerate(
+        zip(source_video_timeline.intervals, output_video_timeline.intervals)
+    ):
+        if abs(source_interval - output_interval) > tolerance:
+            raise VideoPreviewError(f"Generated preview changed frame interval {index}")
+
+    output_duration = _stream_duration(output_video, output_tb)
+    if output_duration is None:
+        if not output_video_timeline.intervals:
+            raise VideoPreviewError(
+                "Cannot determine generated preview duration"
+            )
+        output_duration = (
+            output_video_timeline.timestamps[-1]
+            - output_video_timeline.timestamps[0]
+            + output_video_timeline.intervals[-1]
+        )
+    duration_tolerance = max(Fraction(1, 20), source_info.video_time_base + output_tb)
+    if abs(source_info.presentation_duration - output_duration) > duration_tolerance:
+        raise VideoPreviewError(
+            "Generated preview video duration differs from the source "
+            f"({float(source_info.presentation_duration):.6f}s source, "
+            f"{float(output_duration):.6f}s output, "
+            f"time bases {source_info.video_time_base}/{output_tb})"
+        )
+
+    if source_info.audio is not None and source_audio_timeline is not None:
+        output_audio_tb = _as_fraction(audios[0].get("time_base"))
+        if output_audio_tb is None:
+            raise VideoPreviewError("Generated AAC stream has no valid time base")
+        output_audio_timeline = _probe_timeline(ffprobe, output, "a:0", output_audio_tb)
+        source_offset = _stream_start(source_audio_timeline) - _stream_start(source_video_timeline)
+        output_offset = _stream_start(output_audio_timeline) - _stream_start(output_video_timeline)
+        sample_rate = int(audios[0].get("sample_rate", 48000))
+        aac_frame_duration = Fraction(1024, max(sample_rate, 1))
+        av_tolerance = max(
+            aac_frame_duration,
+            source_info.video_time_base
+            + (_as_fraction(source_info.audio.get("time_base")) or Fraction(0))
+            + output_tb
+            + output_audio_tb,
+        )
+        if abs(source_offset - output_offset) > av_tolerance:
+            raise VideoPreviewError("Generated preview changed the relative audio/video start offset")
+
+        source_audio_duration = _stream_duration(
+            source_info.audio,
+            _as_fraction(source_info.audio.get("time_base")) or Fraction(1, sample_rate),
+        )
+        output_audio_duration = _stream_duration(audios[0], output_audio_tb)
+        if source_audio_duration is not None and output_audio_duration is not None:
+            if abs(source_audio_duration - output_audio_duration) > max(duration_tolerance, aac_frame_duration):
+                raise VideoPreviewError("Generated AAC duration differs from the source audio duration")
+
+    if not output.is_file() or output.stat().st_size == 0:
+        raise VideoPreviewError("Generated MP4 preview is empty")
+
+
+def generate_video_preview(
+    original_copy: Path,
+    preview_directory: Path,
+    original_filename: str,
+    original_size_bytes: int,
+    *,
+    encoder_time_base: str | None = None,
+) -> Path | None:
+    """Create and verify a full-length MP4 preview for an eligible video."""
+    if not is_video_candidate(original_filename, original_size_bytes):
+        return None
+    ffmpeg = _executable("MADOBSIDIAN_FFMPEG", "ffmpeg")
+    ffprobe = _executable("MADOBSIDIAN_FFPROBE", "ffprobe")
+    info = _inspect_video(ffprobe, original_copy)
+    if info is None:
+        return None
+
+    source_video_timeline = _probe_timeline(ffprobe, original_copy, "v:0", info.video_time_base)
+    duration = _video_duration(info)
+    source_audio_timeline = None
+    if info.audio is not None:
+        audio_tb = _as_fraction(info.audio.get("time_base"))
+        if audio_tb is None:
+            raise VideoPreviewError("First audio stream has no valid time base")
+        source_audio_timeline = _probe_timeline(ffprobe, original_copy, "a:0", audio_tb)
+
+    content_width, content_height, canvas_width, canvas_height = _fit_dimensions(
+        info.display_width, info.display_height
+    )
+    video_filter = (
+        f"[0:v:0]scale={content_width}:{content_height}:flags=lanczos,"
+        f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black[main];"
+        # The watermark input is looped forever.  Stop framesync when the main
+        # video ends so the overlay cannot extend output duration.
+        "[main][1:v:0]overlay=x=0:y=0:eof_action=repeat:shortest=1:repeatlast=1,"
+        "format=yuv420p[vout]"
+    )
+    preview_directory.mkdir(parents=True, exist_ok=True)
+    final_path = preview_directory / "preview.mp4"
+    time_base = encoder_time_base or ENCODER_TIME_BASE
+    try:
+        with tempfile.TemporaryDirectory(prefix=".video-work-", dir=preview_directory.parent) as work:
+            work_dir = Path(work)
+            watermark_path = work_dir / "watermark.png"
+            _write_watermark(
+                watermark_path,
+                (canvas_width, canvas_height),
+                original_filename,
+                original_size_bytes,
+                (info.display_width, info.display_height),
+                duration,
+                source_video_timeline,
+            )
+            output_path = work_dir / "preview.mp4"
+            command = [
+                ffmpeg,
+                "-hide_banner", "-nostdin", "-y",
+                "-copyts", "-start_at_zero",
+                "-i", str(original_copy),
+                "-loop", "1", "-framerate", "1", "-i", str(watermark_path),
+                "-filter_complex", video_filter,
+                "-map", "[vout]", "-map", "0:a:0?",
+                "-fps_mode:v", "passthrough",
+                "-enc_time_base:v", time_base,
+                "-c:v", "libx264", "-preset", "medium", "-bf", "0", "-crf", "25",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart",
+                str(output_path),
+            ]
+            try:
+                completed = subprocess.run(command, capture_output=True, text=True, check=False)
+            except OSError as error:
+                raise VideoPreviewError(f"Could not start FFmpeg: {error}") from error
+            if completed.returncode:
+                details = completed.stderr.strip()[-3000:]
+                raise VideoPreviewError(f"FFmpeg failed for {original_filename}: {details or completed.returncode}")
+            _check_output(
+                ffprobe,
+                output_path,
+                info,
+                source_video_timeline,
+                source_audio_timeline,
+                (canvas_width, canvas_height),
+            )
+            os.replace(output_path, final_path)
+    except VideoPreviewError:
+        raise
+    except Exception as error:
+        raise VideoPreviewError(f"Could not generate video preview for {original_filename}: {error}") from error
+    return final_path

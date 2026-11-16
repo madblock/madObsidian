@@ -15,6 +15,7 @@ from pathlib import Path
 
 from madobsidian.filenames import filename_problem
 from madobsidian.previews import generate_preview
+from madobsidian.video_previews import generate_video_preview
 
 
 @dataclass(frozen=True)
@@ -84,12 +85,19 @@ def _import_file(source: Path, objects: Path) -> ImportResult:
             shutil.copyfile(source, target)
             if _sha256(target) != source_hash:
                 raise ImportError(f"Copied file failed SHA-256 verification: {source}")
-            generate_preview(
+            image_preview = generate_preview(
                 target,
                 temporary_dir / "previews",
                 source.name,
                 source_size,
             )
+            if image_preview is None:
+                generate_video_preview(
+                    target,
+                    temporary_dir / "previews",
+                    source.name,
+                    source_size,
+                )
             metadata = _metadata(source, identifier, source_hash, source_size)
             with (temporary_dir / "metadata.json").open("x", encoding="utf-8") as stream:
                 json.dump(asdict(metadata), stream, ensure_ascii=False, indent=2)

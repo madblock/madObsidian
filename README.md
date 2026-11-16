@@ -27,6 +27,11 @@ madObsidian rebuild-index <archive-directory>
 python -m unittest discover -s tests -v
 ```
 
+Video previews require FFmpeg with the `libx264` encoder and `ffprobe` on
+`PATH`. Executable paths can be set with `MADOBSIDIAN_FFMPEG` and
+`MADOBSIDIAN_FFPROBE`; each variable may contain either a path or an executable
+name resolvable through `PATH`.
+
 The importer recursively processes regular files in a directory. Each import
 creates a new object, even when the same content was imported before. Objects
 are stored as `<archive-directory>/objects/<uuid>/<original filename>` with a
@@ -49,6 +54,16 @@ The preview watermark shows the original filename, size in decimal MB, and
 orientation-corrected resolution. Preview generation is part of the temporary
 object import: if generation fails for an eligible image, the object is not
 published.
+
+Video candidates are identified by MIME type and a common-extension fallback,
+then confirmed by `ffprobe`. Videos of 256,000 bytes or more receive a full
+length H.264 MP4 preview at `previews/preview.mp4`, scaled to at most 400 pixels
+on the longest side. The preview includes the first audio stream as AAC when
+present, preserves VFR timing and relative audio/video synchronization, and
+watermarks the original filename, size, display resolution, and video-stream
+duration. VFR videos also include average FPS. Video previews are generated
+before publication; any probe, encoding, or verification failure aborts that
+file's import.
 
 Pillow is the only runtime dependency. The bundled DejaVu Sans font is from
 DejaVu Fonts 2.37; its license is included in
