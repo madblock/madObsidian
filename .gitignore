@@ -29,3 +29,11 @@ Desktop.ini
 # Local FFmpeg build and test artifacts
 ffmpeg-master-latest-win64-gpl/
 bframe-test.mp4
+
+# Machine-local processing configuration
+config.ini
+
+# Local development data
+/archive-test/
+/sync-test/
+/vault/

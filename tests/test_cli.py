@@ -46,6 +46,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertIn("Imported 1 file(s).", output.getvalue())
 
+    def test_legacy_dry_run_is_rejected_without_importing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "item.txt"
+            source.write_text("must remain", encoding="utf-8")
+            archive = root / "archive"
+            output = io.StringIO()
+            with contextlib.redirect_stderr(output):
+                result = main(["import", str(source), str(archive), "--dry-run"])
+            self.assertEqual(result, 1)
+            self.assertIn("--dry-run is only supported for vault imports", output.getvalue())
+            self.assertTrue(source.exists())
+            self.assertFalse(archive.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

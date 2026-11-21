@@ -9,7 +9,7 @@ from unittest import mock
 from PIL import Image, ImageDraw
 
 from madobsidian.importer import import_path
-from madobsidian.previews import PREVIEW_THRESHOLD_BYTES
+from madobsidian.previews import PREVIEW_THRESHOLD_BYTES, PreviewError, generate_preview
 
 
 class PreviewTests(unittest.TestCase):
@@ -167,6 +167,12 @@ class PreviewTests(unittest.TestCase):
         object_dir = self.archive / "objects" / result.metadata.id
         self.assertFalse((object_dir / "previews").exists())
         self.assertEqual((object_dir / source.name).read_bytes(), source.read_bytes())
+
+    def test_corrupt_registered_image_is_not_treated_as_non_image(self) -> None:
+        source = self.root / "corrupt.jpg"
+        source.write_bytes(b"not a JPEG" + b"\0" * (PREVIEW_THRESHOLD_BYTES - len(b"not a JPEG")))
+        with self.assertRaises(PreviewError):
+            generate_preview(source, self.root / "previews", source.name, source.stat().st_size)
 
     def test_preview_failure_leaves_no_published_or_incomplete_object(self) -> None:
         source = self._make_image("failure.png", target_bytes=PREVIEW_THRESHOLD_BYTES)

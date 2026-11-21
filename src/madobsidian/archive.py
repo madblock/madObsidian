@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
+import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -15,7 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from madobsidian.filenames import filename_problem
+from madobsidian.video_previews import _executable, _inspect_video, is_video_candidate
+from madobsidian.previews import is_registered_image_filename
+from PIL import Image, UnidentifiedImageError
 
+from madobsidian.config import DEFAULT_CONFIG
 
 @dataclass(frozen=True)
 class ArchiveObject:
@@ -117,7 +123,7 @@ def _validate_metadata(data: Any, directory_id: str) -> str | None:
     return None
 
 
-def _scan_object(directory: Path) -> ArchiveObject | ArchiveProblem:
+def _scan_object(directory: Path, small_file_threshold_bytes: int) -> ArchiveObject | ArchiveProblem:
     object_id = directory.name
     if directory.is_symlink():
         return ArchiveProblem(object_id, "object directory is a symbolic link")
@@ -146,7 +152,20 @@ def _scan_object(directory: Path) -> ArchiveObject | ArchiveProblem:
     validation_error = _validate_metadata(data, object_id)
     if validation_error:
         return ArchiveProblem(object_id, validation_error)
-    original = directory / data["original_filename"]
+    original_path = data.get("original_path", data["original_filename"])
+    if not isinstance(original_path, str) or Path(original_path).is_absolute() or ".." in Path(original_path).parts or "\\" in original_path:
+        return ArchiveProblem(object_id, "metadata field 'original_path' must be a safe relative path")
+    if len(Path(original_path).parts) not in (1, 2) or (len(Path(original_path).parts) == 2 and Path(original_path).parts[0] not in {"shared", "originals"}):
+        return ArchiveProblem(object_id, "metadata field 'original_path' has an unsupported layout")
+    if Path(original_path).name != data["original_filename"]:
+        return ArchiveProblem(object_id, "metadata field 'original_path' does not match original_filename")
+    if len(Path(original_path).parts) == 2:
+        expected_folder = "shared" if data["size_bytes"] < small_file_threshold_bytes else "originals"
+        if Path(original_path).parts[0] != expected_folder:
+            return ArchiveProblem(object_id, "metadata original_path does not match the size-based storage layout")
+        if (directory / expected_folder).is_symlink():
+            return ArchiveProblem(object_id, "original storage directory is a symbolic link")
+    original = directory / original_path
     try:
         if original.is_symlink():
             return ArchiveProblem(object_id, "original file is a symbolic link")
@@ -164,20 +183,113 @@ def _scan_object(directory: Path) -> ArchiveObject | ArchiveProblem:
         return ArchiveProblem(object_id, str(error))
     if actual_hash != data["sha256"].lower():
         return ArchiveProblem(object_id, "original file SHA-256 does not match metadata")
-    relative_path = (Path("objects") / object_id / data["original_filename"]).as_posix()
+    preview_error = _validate_expected_preview(directory, original, data, small_file_threshold_bytes)
+    if preview_error:
+        return ArchiveProblem(object_id, preview_error)
+    previews = directory / "previews"
+    if previews.is_symlink():
+        return ArchiveProblem(object_id, "previews directory is a symbolic link")
+    if previews.exists():
+        if not previews.is_dir():
+            return ArchiveProblem(object_id, "previews path is not a directory")
+        try:
+            for preview in previews.iterdir():
+                if preview.name not in {"preview.webp", "preview.mp4"}:
+                    return ArchiveProblem(object_id, f"unsupported preview file: {preview.name}")
+                if preview.is_symlink() or not preview.is_file():
+                    return ArchiveProblem(object_id, f"preview is not a regular file: {preview.name}")
+        except OSError as error:
+            return ArchiveProblem(object_id, f"cannot inspect previews: {error}")
+    relative_path = (Path("objects") / object_id / original_path).as_posix()
     return ArchiveObject(data, relative_path)
 
 
-def scan_archive(archive: str | Path) -> ScanReport:
+def _validate_expected_preview(directory: Path, original: Path, metadata: dict[str, Any],
+                               small_file_threshold_bytes: int) -> str | None:
+    if metadata["size_bytes"] < small_file_threshold_bytes:
+        return None
+    expected: str | None = None
+    try:
+        with Image.open(original):
+            expected = "preview.webp"
+    except UnidentifiedImageError as error:
+        if is_registered_image_filename(metadata["original_filename"]):
+            return f"eligible image original cannot be decoded: {error}"
+    except OSError as error:
+        if metadata["mime_type"].startswith("image/"):
+            return f"eligible image original cannot be decoded: {error}"
+    if expected is None and is_video_candidate(
+        metadata["original_filename"], metadata["size_bytes"], small_file_threshold_bytes
+    ):
+        expected = "preview.mp4"
+    if expected is None or ("original_path" not in metadata and not (directory / "previews").exists()):
+        return None
+    preview = directory / "previews" / expected
+    if preview.is_symlink() or not preview.is_file():
+        return f"expected preview is missing or unsafe: {expected}"
+    if expected == "preview.webp":
+        try:
+            with Image.open(preview) as image:
+                if image.format != "WEBP":
+                    return "image preview is not WebP"
+                image.verify()
+            with Image.open(preview) as image:
+                image.load()
+        except (OSError, UnidentifiedImageError) as error:
+            return f"image preview cannot be decoded: {error}"
+        return None
+    try:
+        ffprobe = _executable("MADOBSIDIAN_FFPROBE", "ffprobe")
+        ffmpeg = _executable("MADOBSIDIAN_FFMPEG", "ffmpeg")
+        info = _inspect_video(ffprobe, preview)
+        if info is None or info.video.get("codec_name") != "h264":
+            return "video preview is not a decodable H.264 video"
+        decoded = subprocess.run(
+            [ffmpeg, "-hide_banner", "-v", "error", "-i", str(preview), "-f", "null", "-"],
+            capture_output=True, text=True, check=False,
+        )
+        if decoded.returncode != 0:
+            return f"video preview cannot be decoded: {decoded.stderr[-1000:]}"
+    except (OSError, ValueError) as error:
+        return f"cannot validate video preview: {error}"
+    return None
+
+
+def _resolve_objects_directory(root: Path, configured: str | Path) -> tuple[Path, Path]:
+    value = Path(configured).expanduser()
+    root_resolved = root.resolve()
+    candidate = Path(os.path.abspath(value if value.is_absolute() else root_resolved / value))
+    try:
+        relative = candidate.relative_to(root_resolved)
+    except ValueError as error:
+        raise ArchiveError(f"objects_directory must be inside archive root: {configured}") from error
+    current = root_resolved
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            raise ArchiveError(f"objects directory path contains a symbolic link: {current}")
+    if not relative.parts:
+        raise ArchiveError("objects_directory cannot be the archive root")
+    target = candidate.resolve()
+    try:
+        target.relative_to(root_resolved)
+    except ValueError as error:
+        raise ArchiveError(f"objects_directory resolves outside archive root: {configured}") from error
+    return target, relative
+
+
+def scan_archive(archive: str | Path, *, objects_directory: str | Path = "objects",
+                 small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes) -> ScanReport:
     """Validate UUID object directories without modifying the archive."""
     root = Path(archive)
     if root.is_symlink():
         return ScanReport((), (ArchiveProblem("archive", "archive root is a symbolic link"),))
-    objects_dir = root / "objects"
-    if objects_dir.is_symlink():
-        return ScanReport((), (ArchiveProblem("objects", "objects directory is a symbolic link"),))
+    try:
+        objects_dir, objects_relative = _resolve_objects_directory(root, objects_directory)
+    except ArchiveError as error:
+        return ScanReport((), (ArchiveProblem("objects", str(error)),))
     if not objects_dir.exists():
-        return ScanReport((), ())
+        return ScanReport((), (ArchiveProblem("objects", f"configured objects directory does not exist: {objects_dir}"),))
     if not objects_dir.is_dir():
         return ScanReport((), (ArchiveProblem("objects", "objects path is not a directory"),))
 
@@ -192,6 +304,13 @@ def scan_archive(archive: str | Path) -> ScanReport:
         if entry.name.startswith(".incomplete-"):
             problems.append(ArchiveProblem(entry.name, "abandoned importer temporary directory; investigate manually"))
             continue
+        journal = entry / "transaction.json"
+        if journal.is_symlink():
+            problems.append(ArchiveProblem(entry.name, "transaction.json is a symbolic link"))
+            continue
+        if journal.exists():
+            problems.append(ArchiveProblem(entry.name, "unfinished vault import transaction; rerun import to recover"))
+            continue
         try:
             parsed_id = uuid.UUID(entry.name)
         except ValueError:
@@ -199,18 +318,22 @@ def scan_archive(archive: str | Path) -> ScanReport:
         if entry.name != str(parsed_id):
             problems.append(ArchiveProblem(entry.name, "object directory name must use canonical lowercase UUID syntax"))
             continue
-        result = _scan_object(entry)
+        result = _scan_object(entry, small_file_threshold_bytes)
         if isinstance(result, ArchiveProblem):
             problems.append(result)
         else:
-            valid.append(result)
+            original_relative = result.metadata.get("original_path", result.metadata["original_filename"])
+            relative_path = (objects_relative / entry.name / original_relative).as_posix()
+            valid.append(ArchiveObject(result.metadata, relative_path))
     return ScanReport(tuple(valid), tuple(problems))
 
 
-def rebuild_index(archive: str | Path) -> ScanReport:
+def rebuild_index(archive: str | Path, *, objects_directory: str | Path = "objects",
+                  small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes) -> ScanReport:
     """Rebuild the disposable JSON index, refusing replacement on bad objects."""
     root = Path(archive)
-    report = scan_archive(root)
+    report = scan_archive(root, objects_directory=objects_directory,
+                          small_file_threshold_bytes=small_file_threshold_bytes)
     if report.problems:
         return report
     if root.is_symlink():

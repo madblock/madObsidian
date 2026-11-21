@@ -16,6 +16,7 @@ from unittest import mock
 
 from PIL import ImageDraw
 
+from madobsidian.archive import scan_archive
 from madobsidian.importer import import_path
 from madobsidian.video_previews import (
     VIDEO_PREVIEW_THRESHOLD_BYTES,
@@ -256,6 +257,8 @@ class VideoPreviewTests(unittest.TestCase):
         self.assertEqual(source.stat().st_size, 256_000)
         result = import_path(source, self.archive)[0]
         self.assertTrue(self._object_preview(result).is_file())
+        report = scan_archive(self.archive)
+        self.assertEqual(report.problems, ())
 
     def test_large_nonvideo_input_has_no_video_preview(self) -> None:
         source = self.root / "not-video.bin"

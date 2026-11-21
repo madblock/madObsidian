@@ -17,9 +17,11 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
+from madobsidian.config import AppConfig, DEFAULT_CONFIG, VideoConfig, WatermarkConfig
 
-VIDEO_PREVIEW_THRESHOLD_BYTES = 256_000
-MAX_VIDEO_PREVIEW_DIMENSION = 400
+
+VIDEO_PREVIEW_THRESHOLD_BYTES = DEFAULT_CONFIG.general.small_file_threshold_bytes
+MAX_VIDEO_PREVIEW_DIMENSION = DEFAULT_CONFIG.videos.max_dimension
 VIDEO_EXTENSIONS = frozenset(
     {
         ".3g2", ".3gp", ".asf", ".avi", ".f4v", ".flv", ".m2t", ".m2ts",
@@ -31,7 +33,6 @@ VIDEO_EXTENSIONS = frozenset(
 # identical relative source/output PTS and frame intervals (0 s maximum error)
 # with both `filter` and `demux`; `filter` explicitly selects the filtergraph TB.
 ENCODER_TIME_BASE = "filter"
-_FONT_PATH = Path(__file__).parent / "assets" / "DejaVuSans.ttf"
 
 
 class VideoPreviewError(OSError):
@@ -57,9 +58,9 @@ class FrameTimeline:
     variable_frame_rate: bool
 
 
-def is_video_candidate(filename: str, size_bytes: int) -> bool:
+def is_video_candidate(filename: str, size_bytes: int, threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes) -> bool:
     """Check the threshold and both MIME and extension-based video hints."""
-    if size_bytes < VIDEO_PREVIEW_THRESHOLD_BYTES:
+    if size_bytes < threshold_bytes:
         return False
     mime_type, _ = mimetypes.guess_type(filename)
     return bool(mime_type and mime_type.startswith("video/")) or Path(filename).suffix.casefold() in VIDEO_EXTENSIONS
@@ -226,8 +227,8 @@ def _format_duration(seconds: Fraction) -> str:
     return f"{hours:02d}:{minutes:02d}:{remainder:05.2f}"
 
 
-def _fit_dimensions(width: int, height: int) -> tuple[int, int, int, int]:
-    scale = min(1.0, MAX_VIDEO_PREVIEW_DIMENSION / max(width, height))
+def _fit_dimensions(width: int, height: int, max_dimension: int = MAX_VIDEO_PREVIEW_DIMENSION) -> tuple[int, int, int, int]:
+    scale = min(1.0, max_dimension / max(width, height))
     content_width = max(1, round(width * scale))
     content_height = max(1, round(height * scale))
     canvas_width = content_width + content_width % 2
@@ -267,7 +268,9 @@ def _write_watermark(
     resolution: tuple[int, int],
     duration: Fraction,
     timeline: FrameTimeline,
+    settings: WatermarkConfig | None = None,
 ) -> str:
+    settings = settings or DEFAULT_CONFIG.watermark
     width, height = canvas_size
     fps = Fraction(timeline.frame_count, 1) / duration
     detail = (
@@ -277,19 +280,22 @@ def _write_watermark(
     if timeline.variable_frame_rate:
         detail += f" | {float(fps):.2f} FPS avg"
     text = f"{filename}\n{detail}"
-    font_size = max(9, min(14, width // 32))
-    font = ImageFont.truetype(str(_FONT_PATH), font_size)
-    padding = 6
+    font_size = settings.font_size if settings.font_size is not None else max(9, min(14, width // 32))
+    font = ImageFont.truetype(str(settings.font_path), font_size)
+    padding = settings.margin if settings.margin is not None else 6
     lines = _wrap_text(text, font, max(1, width - padding * 2))
     line_height = max(font_size + 2, font.getbbox("Ag")[3] - font.getbbox("Ag")[1] + 2)
     band_height = min(height, len(lines) * line_height + padding * 2)
     overlay = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    top = height - band_height
-    draw.rectangle((0, top, width, height), fill=(0, 0, 0, 155))
+    top = 0 if settings.position.startswith("top-") else height - band_height
+    opacity = settings.opacity if settings.opacity is not None else 155
+    draw.rectangle((0, top, width, top + band_height), fill=(0, 0, 0, opacity))
     y = top + padding
     for line in lines:
-        draw.text((padding, y), line, font=font, fill=(255, 255, 255, 255))
+        text_width = font.getlength(line)
+        x = width - padding - text_width if settings.position.endswith("right") else padding
+        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
         y += line_height
     overlay.save(path, format="PNG")
     return text
@@ -310,23 +316,26 @@ def _check_output(
     source_video_timeline: FrameTimeline,
     source_audio_timeline: FrameTimeline | None,
     dimensions: tuple[int, int],
+    video_config: VideoConfig | None = None,
 ) -> None:
+    video_config = video_config or DEFAULT_CONFIG.videos
     result = _run_json_probe(ffprobe, ["-show_streams", "-show_format"], output)
     streams = tuple(result.get("streams", ()))
     videos = [stream for stream in streams if stream.get("codec_type") == "video"]
     audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
-    if not videos or videos[0].get("codec_name") != "h264":
-        raise VideoPreviewError("Generated preview does not contain an H.264 video stream")
+    codec_name = {"libx264": "h264"}.get(video_config.video_codec, video_config.video_codec)
+    if not videos or videos[0].get("codec_name") != codec_name:
+        raise VideoPreviewError(f"Generated preview does not contain {codec_name} video")
     output_video = videos[0]
     if (int(output_video.get("width", 0)), int(output_video.get("height", 0))) != dimensions:
         raise VideoPreviewError("Generated preview dimensions do not match the requested scale")
-    if max(dimensions) > MAX_VIDEO_PREVIEW_DIMENSION:
+    if max(dimensions) > video_config.max_dimension:
         raise VideoPreviewError("Generated preview exceeds the maximum dimension")
     if source_info.audio is None:
         if audios:
             raise VideoPreviewError("Generated silent-video preview unexpectedly contains audio")
-    elif not audios or audios[0].get("codec_name") != "aac":
-        raise VideoPreviewError("Generated preview is missing the first AAC audio stream")
+    elif not audios or audios[0].get("codec_name") != video_config.audio_codec:
+        raise VideoPreviewError(f"Generated preview is missing the first {video_config.audio_codec} audio stream")
 
     output_tb = _as_fraction(output_video.get("time_base"))
     if output_tb is None:
@@ -405,15 +414,19 @@ def generate_video_preview(
     original_size_bytes: int,
     *,
     encoder_time_base: str | None = None,
+    config: AppConfig | None = None,
 ) -> Path | None:
     """Create and verify a full-length MP4 preview for an eligible video."""
-    if not is_video_candidate(original_filename, original_size_bytes):
+    config = config or DEFAULT_CONFIG
+    video_settings = config.videos
+    watermark_settings = config.watermark
+    if not is_video_candidate(original_filename, original_size_bytes, config.general.small_file_threshold_bytes):
         return None
     ffmpeg = _executable("MADOBSIDIAN_FFMPEG", "ffmpeg")
     ffprobe = _executable("MADOBSIDIAN_FFPROBE", "ffprobe")
     info = _inspect_video(ffprobe, original_copy)
     if info is None:
-        return None
+        raise VideoPreviewError(f"Eligible video candidate has no video stream: {original_filename}")
 
     source_video_timeline = _probe_timeline(ffprobe, original_copy, "v:0", info.video_time_base)
     duration = _video_duration(info)
@@ -425,48 +438,57 @@ def generate_video_preview(
         source_audio_timeline = _probe_timeline(ffprobe, original_copy, "a:0", audio_tb)
 
     content_width, content_height, canvas_width, canvas_height = _fit_dimensions(
-        info.display_width, info.display_height
+        info.display_width, info.display_height, video_settings.max_dimension
     )
-    video_filter = (
+    video_filter_base = (
         f"[0:v:0]scale={content_width}:{content_height}:flags=lanczos,"
-        f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black[main];"
-        # The watermark input is looped forever.  Stop framesync when the main
-        # video ends so the overlay cannot extend output duration.
-        "[main][1:v:0]overlay=x=0:y=0:eof_action=repeat:shortest=1:repeatlast=1,"
-        "format=yuv420p[vout]"
+        f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black[main]"
     )
     preview_directory.mkdir(parents=True, exist_ok=True)
-    final_path = preview_directory / "preview.mp4"
+    final_path = preview_directory / f"preview.{video_settings.format}"
     time_base = encoder_time_base or ENCODER_TIME_BASE
     try:
         with tempfile.TemporaryDirectory(prefix=".video-work-", dir=preview_directory.parent) as work:
             work_dir = Path(work)
-            watermark_path = work_dir / "watermark.png"
-            _write_watermark(
-                watermark_path,
-                (canvas_width, canvas_height),
-                original_filename,
-                original_size_bytes,
-                (info.display_width, info.display_height),
-                duration,
-                source_video_timeline,
-            )
-            output_path = work_dir / "preview.mp4"
+            if watermark_settings.enabled:
+                watermark_path = work_dir / "watermark.png"
+                _write_watermark(
+                    watermark_path,
+                    (canvas_width, canvas_height),
+                    original_filename,
+                    original_size_bytes,
+                    (info.display_width, info.display_height),
+                    duration,
+                    source_video_timeline,
+                    watermark_settings,
+                )
+                video_filter = (
+                    video_filter_base + ";"
+                    # The watermark input is looped forever. Stop framesync at end of main video.
+                    + "[main][1:v:0]overlay=x=0:y=0:eof_action=repeat:shortest=1:repeatlast=1,"
+                    "format=yuv420p[vout]"
+                )
+            else:
+                video_filter = video_filter_base + ";[main]format=yuv420p[vout]"
+            output_path = work_dir / f"preview.{video_settings.format}"
             command = [
                 ffmpeg,
                 "-hide_banner", "-nostdin", "-y",
                 "-copyts", "-start_at_zero",
                 "-i", str(original_copy),
-                "-loop", "1", "-framerate", "1", "-i", str(watermark_path),
-                "-filter_complex", video_filter,
-                "-map", "[vout]", "-map", "0:a:0?",
+            ]
+            if watermark_settings.enabled:
+                command.extend(["-loop", "1", "-framerate", "1", "-i", str(watermark_path)])
+            command.extend([
+                "-filter_complex", video_filter, "-map", "[vout]", "-map", "0:a:0?",
                 "-fps_mode:v", "passthrough",
                 "-enc_time_base:v", time_base,
-                "-c:v", "libx264", "-preset", "medium", "-bf", "0", "-crf", "25",
-                "-c:a", "aac", "-b:a", "128k",
+                "-c:v", video_settings.video_codec, "-preset", video_settings.preset, "-bf", "0", "-crf", str(video_settings.video_crf),
+                "-c:a", video_settings.audio_codec, "-b:a", "128k",
                 "-movflags", "+faststart",
+                "-f", video_settings.format,
                 str(output_path),
-            ]
+            ])
             try:
                 completed = subprocess.run(command, capture_output=True, text=True, check=False)
             except OSError as error:
@@ -481,6 +503,7 @@ def generate_video_preview(
                 source_video_timeline,
                 source_audio_timeline,
                 (canvas_width, canvas_height),
+                video_settings,
             )
             os.replace(output_path, final_path)
     except VideoPreviewError:

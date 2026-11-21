@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+from PIL import Image
 
 from madobsidian.archive import rebuild_index, scan_archive
 from madobsidian.cli import main
@@ -342,6 +343,30 @@ class ArchiveTests(unittest.TestCase):
         self.assertTrue(report.problems)
         self.assertEqual(index.read_bytes(), b"previous-index\n")
 
+    def test_missing_configured_objects_directory_does_not_replace_index(self) -> None:
+        self.add_object()
+        index = self.archive / "index.json"
+        index.write_bytes(b"previous-index\n")
+        report = rebuild_index(self.archive, objects_directory="objects-typo")
+        self.assertTrue(any("configured objects directory does not exist" in p.reason for p in report.problems))
+        self.assertEqual(index.read_bytes(), b"previous-index\n")
+
+    def test_corrupt_registered_image_is_rejected_as_eligible_image(self) -> None:
+        identifier = str(uuid.uuid4())
+        directory = self.objects / identifier
+        (directory / "originals").mkdir(parents=True)
+        original = directory / "originals" / "corrupt.jpg"
+        original.write_bytes(b"not a JPEG" + b"\0" * (256_000 - len(b"not a JPEG")))
+        content = original.read_bytes()
+        metadata = {
+            "id": identifier, "original_filename": original.name, "original_path": "originals/corrupt.jpg",
+            "extension": ".jpg", "mime_type": "image/jpeg", "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(), "imported_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        report = scan_archive(self.archive)
+        self.assertTrue(any("eligible image original cannot be decoded" in p.reason for p in report.problems))
+
     def test_index_replacement_failure_preserves_previous_index_and_cleans_temp(self) -> None:
         self.add_object()
         index = self.archive / "index.json"
@@ -359,6 +384,51 @@ class ArchiveTests(unittest.TestCase):
         report = scan_archive(self.archive)
         self.assertEqual(len(report.objects), 1)
         self.assertEqual(report.problems, ())
+
+    def test_new_large_image_requires_a_decodable_preview_and_blocks_index(self) -> None:
+        identifier = str(uuid.uuid4())
+        directory = self.objects / identifier
+        (directory / "originals").mkdir(parents=True)
+        original = directory / "originals" / "large.png"
+        Image.new("RGB", (64, 64), (10, 20, 30)).save(original, format="PNG")
+        with original.open("ab") as stream:
+            stream.write(b"\0" * (256_000 - original.stat().st_size))
+        content = original.read_bytes()
+        metadata = {
+            "id": identifier, "original_filename": original.name, "original_path": "originals/large.png",
+            "extension": ".png", "mime_type": "image/png", "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(), "imported_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (directory / "previews").mkdir()
+        Image.new("RGB", (32, 32), (30, 20, 10)).save(directory / "previews" / "preview.webp", format="WEBP")
+        self.assertEqual(scan_archive(self.archive).problems, ())
+        (directory / "previews" / "preview.webp").unlink()
+        index = self.archive / "index.json"
+        index.write_bytes(b"keep previous index")
+        report = rebuild_index(self.archive)
+        self.assertTrue(any("expected preview is missing" in p.reason for p in report.problems))
+        self.assertEqual(index.read_bytes(), b"keep previous index")
+        (directory / "previews" / "preview.webp").write_bytes(b"not webp")
+        self.assertTrue(any("cannot be decoded" in p.reason for p in scan_archive(self.archive).problems))
+
+    def test_legacy_large_object_without_preview_remains_verifiable(self) -> None:
+        content = b"legacy bytes" + b"\0" * (256_000 - len(b"legacy bytes"))
+        directory, _ = self.add_object(content)
+        report = scan_archive(self.archive)
+        self.assertEqual(len(report.objects), 1)
+        self.assertEqual(report.problems, ())
+
+    def test_dangling_transaction_journal_symlink_is_reported(self) -> None:
+        directory, _ = self.add_object()
+        journal = directory / "transaction.json"
+        try:
+            os.symlink(self.root / "does-not-exist.json", journal)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"Cannot create dangling symlink in this environment: {error}")
+        report = scan_archive(self.archive)
+        self.assertFalse(report.objects)
+        self.assertTrue(any("transaction.json is a symbolic link" in p.reason for p in report.problems))
 
 
 if __name__ == "__main__":
