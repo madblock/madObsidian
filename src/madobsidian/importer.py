@@ -83,8 +83,8 @@ def _append_import_error(log_path: Path, source: Path | None, error: Exception) 
         pass
 
 
-def _import_file_impl(source: Path, objects: Path, *, layout: bool = False, identifier: uuid.UUID | None = None,
-                      transaction: dict[str, object] | None = None, config: AppConfig | None = None) -> ImportResult:
+def _import_file(source: Path, objects: Path, *, layout: bool = False, identifier: uuid.UUID | None = None,
+                 transaction: dict[str, object] | None = None, config: AppConfig | None = None) -> ImportResult:
     config = config or DEFAULT_CONFIG
     # Check the path itself before is_file/open/stat: those operations follow links.
     if source.is_symlink():
@@ -190,19 +190,6 @@ def _import_file_impl(source: Path, objects: Path, *, layout: bool = False, iden
             if temporary_dir.exists() and (not move_attempted or safe_cleanup_after_move_failure):
                 shutil.rmtree(temporary_dir, ignore_errors=True)
             raise
-
-
-def _import_file(source: Path, objects: Path, *, layout: bool = False, identifier: uuid.UUID | None = None,
-                 transaction: dict[str, object] | None = None, config: AppConfig | None = None,
-                 error_log_path: Path | None = None) -> ImportResult:
-    try:
-        return _import_file_impl(source, objects, layout=layout, identifier=identifier,
-                                 transaction=transaction, config=config)
-    except Exception as error:
-        if error_log_path is not None:
-            _append_import_error(error_log_path, source, error)
-        raise
-
 
 def import_path(source: str | Path, archive: str | Path, *, config: AppConfig | None = None) -> list[ImportResult]:
     """Import a file or recursively import regular files from a directory."""
