@@ -17,8 +17,8 @@ from pathlib import Path
 
 from madobsidian.config import AppConfig, DEFAULT_CONFIG, resolve_vault_directory
 from madobsidian.filenames import filename_problem
-from madobsidian.previews import generate_preview
-from madobsidian.video_previews import generate_video_preview, is_video_candidate
+from madobsidian.previews import REGISTERED_IMAGE_EXTENSIONS, generate_preview
+from madobsidian.video_previews import VIDEO_EXTENSIONS, generate_video_preview, is_video_candidate
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,15 @@ class ImportResult:
 
 class ImportError(Exception):
     """Raised when an item cannot be safely imported."""
+
+
+def _media_kind(filename: str) -> str | None:
+    suffix = Path(filename).suffix.casefold()
+    if suffix in REGISTERED_IMAGE_EXTENSIONS:
+        return "image"
+    if suffix in VIDEO_EXTENSIONS:
+        return "video"
+    return None
 
 
 def _sha256(path: Path) -> str:
@@ -296,7 +305,6 @@ def _markdown_plan(
     *,
     eligible_names: list[str] | None = None,
     ambiguities: list[dict[str, object]] | None = None,
-    small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes,
     objects_directory: str = "objects",
     incoming_directory: str = "Incoming",
 ) -> dict[str, list[dict[str, object]]]:
@@ -308,8 +316,7 @@ def _markdown_plan(
     normalized_names: dict[str, list[str]] = {}
     for name in names:
         normalized_names.setdefault(unicodedata.normalize("NFC", name), []).append(name)
-    from madobsidian.video_previews import is_video_candidate
-    video = is_large and is_video_candidate(filename, small_file_threshold_bytes)
+    video = is_large and _media_kind(filename) == "video"
     preview = "preview.mp4" if video else "preview.webp"
     replacement = f"{objects_directory}/{identifier}/previews/{preview}" if is_large else f"{objects_directory}/{identifier}/shared/{filename}"
     for note in sorted(vault.rglob("*.md"), key=lambda p: str(p).casefold()):
@@ -695,54 +702,69 @@ def import_vault(vault: str | Path, *, dry_run: bool = False, config: AppConfig 
         raise
     files = sorted((p for p in incoming.rglob("*") if not p.is_symlink() and p.is_file()), key=lambda p: str(p).casefold())
     direct_files = [p for p in files if p.parent == incoming and p.relative_to(root).as_posix() not in covered_sources]
-    for path in direct_files:
+    media_files = [p for p in direct_files if not p.name.startswith(".") and _media_kind(p.name) is not None]
+    for path in media_files:
         invalid = filename_problem(path.name)
         if invalid:
             if not dry_run:
                 _append_import_error(error_log_path, path, ImportError(invalid))
             raise ImportError(invalid)
-    eligible_names = [p.name for p in direct_files]
+    candidate_names = [p.name for p in media_files]
+    candidate_plans: dict[Path, dict[str, object]] = {}
+    ambiguous_names: set[str] = set()
+    for source in media_files:
+        try:
+            size = source.stat().st_size
+            identifier = str(uuid.uuid4())
+            ambiguities: list[dict[str, object]] = []
+            reference_plan = _markdown_plan(
+                root, source.name, identifier,
+                size >= config.general.small_file_threshold_bytes,
+                eligible_names=candidate_names,
+                ambiguities=ambiguities,
+                objects_directory=objects_relative,
+                incoming_directory=incoming_relative,
+            )
+            candidate_plans[source] = {
+                "id": identifier,
+                "size": size,
+                "changes": reference_plan,
+                "ambiguities": ambiguities,
+            }
+            for ambiguity in ambiguities:
+                ambiguous_names.update(ambiguity["candidates"])
+        except Exception as error:
+            if not dry_run:
+                _append_import_error(error_log_path, source, error)
+            raise
+    referenced_files = [
+        source for source in media_files
+        if candidate_plans[source]["changes"] or source.name in ambiguous_names
+    ]
     plan: list[dict[str, object]] = []
     if dry_run:
         for row in recovery_rows:
             plan.append({**row, "target": "", "changes": {}})
-    for source in files:
-        if source.parent != incoming:
-            # Preserve relative attachment paths only when the final object layout supports them;
-            # current metadata intentionally permits a basename only.
-            continue
+    for source in referenced_files:
         try:
-            size = source.stat().st_size
+            candidate = candidate_plans[source]
+            size = candidate["size"]
             source_rel = source.relative_to(root).as_posix()
             if source_rel in covered_sources:
                 continue
-            identifier = str(uuid.uuid4())
-            ambiguities: list[dict[str, object]] = []
-            edits = _markdown_plan(
-                root, source.name, identifier, size >= config.general.small_file_threshold_bytes,
-                eligible_names=eligible_names, ambiguities=ambiguities,
-                small_file_threshold_bytes=config.general.small_file_threshold_bytes,
-                objects_directory=objects_relative,
-                incoming_directory=incoming_relative,
-            )
+            identifier = candidate["id"]
+            edits = candidate["changes"]
             row: dict[str, object] = {"id": identifier, "source": source.relative_to(root).as_posix(),
                                       "target": f"{objects_relative}/{identifier}/{ 'originals' if size >= config.general.small_file_threshold_bytes else 'shared'}/{source.name}",
-                                      "preview": ("preview.mp4" if is_video_candidate(source.name, size, config.general.small_file_threshold_bytes) else "preview.webp") if size >= config.general.small_file_threshold_bytes else None,
-                                      "changes": edits, "ambiguities": ambiguities, "recovery": False}
+                                      "preview": ("preview.mp4" if _media_kind(source.name) == "video" else "preview.webp") if size >= config.general.small_file_threshold_bytes else None,
+                                      "changes": edits, "ambiguities": candidate["ambiguities"], "recovery": False}
             plan.append(row)
             if dry_run:
                 continue
             # Move and verify the original, then generate previews and metadata.
             objects.mkdir(parents=True, exist_ok=True)
             manifest: dict[str, object] = {"source": source.relative_to(root).as_posix(),
-                                          "markdown": _markdown_plan(
-                                              root, source.name, identifier,
-                                              size >= config.general.small_file_threshold_bytes,
-                                              eligible_names=eligible_names,
-                                              small_file_threshold_bytes=config.general.small_file_threshold_bytes,
-                                              objects_directory=objects_relative,
-                                              incoming_directory=incoming_relative,
-                                          ),
+                                          "markdown": edits,
                                           "sha256": _sha256(source), "size_bytes": size}
             result = _import_file(source, objects, layout=True, identifier=uuid.UUID(identifier), transaction=manifest,
                                   config=config)

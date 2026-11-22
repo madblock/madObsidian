@@ -25,10 +25,10 @@ class VaultImportTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_small_file_layout_and_markdown_rewrite(self):
-        source = self.vault / "Incoming" / "café [x].txt"
+        source = self.vault / "Incoming" / "café [x].jpg"
         source.write_bytes(b"small")
         note = self.vault / "Folder" / "note.md"
-        note.write_text("![[Incoming/café [x].txt|caption]]\n[[Incoming/café [x].txt]]", encoding="utf-8")
+        note.write_text("![[Incoming/café [x].jpg|caption]]\n[[Incoming/café [x].jpg]]", encoding="utf-8")
         with mock.patch("madobsidian.importer.generate_preview", return_value=None), mock.patch(
             "madobsidian.importer.generate_video_preview", return_value=None
         ):
@@ -36,7 +36,7 @@ class VaultImportTests(unittest.TestCase):
         original = self.vault / result["target"]
         self.assertEqual(original.read_bytes(), b"small")
         data = json.loads((original.parent.parent / "metadata.json").read_text(encoding="utf-8"))
-        self.assertEqual(data["original_path"], "shared/café [x].txt")
+        self.assertEqual(data["original_path"], "shared/café [x].jpg")
         self.assertEqual(data["sha256"], hashlib.sha256(original.read_bytes()).hexdigest())
         rewritten = note.read_text(encoding="utf-8")
         self.assertEqual(rewritten.count("objects/" + str(result["id"]) + "/shared/"), 2)
@@ -60,10 +60,10 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual((self.vault / result["target"]).stat().st_size, 256_000)
 
     def test_dry_run_is_read_only_and_reports_note(self):
-        source = self.vault / "Incoming" / "a.txt"
+        source = self.vault / "Incoming" / "a.jpg"
         source.write_text("bytes", encoding="utf-8")
         note = self.vault / "note.md"
-        note.write_text("![[Incoming/a.txt]]", encoding="utf-8")
+        note.write_text("![[Incoming/a.jpg]]", encoding="utf-8")
         before = {p.relative_to(self.vault).as_posix(): p.read_bytes() for p in self.vault.rglob("*") if p.is_file()}
         rows = import_vault(self.vault, dry_run=True)
         after = {p.relative_to(self.vault).as_posix(): p.read_bytes() for p in self.vault.rglob("*") if p.is_file()}
@@ -71,16 +71,114 @@ class VaultImportTests(unittest.TestCase):
         self.assertIn("note.md", rows[0]["changes"])
         self.assertFalse((self.vault / "objects").exists())
 
+    def test_referenced_supported_image_and_video_are_imported(self):
+        image = self.vault / "Incoming" / "picture.JPG"
+        video = self.vault / "Incoming" / "clip.MP4"
+        image.write_bytes(b"synthetic image bytes")
+        video.write_bytes(b"synthetic video bytes")
+        note = self.vault / "note.md"
+        note.write_text("![[Incoming/picture.JPG]]\n![[Incoming/clip.MP4]]", encoding="utf-8")
+        with self._without_previews()[0], self._without_previews()[1]:
+            rows = import_vault(self.vault)
+        self.assertEqual(len(rows), 2)
+        self.assertFalse(image.exists())
+        self.assertFalse(video.exists())
+        self.assertEqual(len(list((self.vault / "objects").glob("[0-9a-f]*"))), 2)
+
+    def test_unreferenced_supported_media_is_skipped_and_left_untouched(self):
+        source = self.vault / "Incoming" / "unreferenced.jpg"
+        content = b"do not import"
+        source.write_bytes(content)
+        (self.vault / "note.md").write_text("No attachment here.", encoding="utf-8")
+        rows = import_vault(self.vault)
+        self.assertEqual(rows, [])
+        self.assertEqual(source.read_bytes(), content)
+        self.assertFalse((self.vault / "objects").exists())
+
+    def test_hidden_referenced_and_unreferenced_files_are_skipped(self):
+        referenced = self.vault / "Incoming" / ".hidden.jpg"
+        unreferenced = self.vault / "Incoming" / ".syncthing.0. Introduction.mp4.tmp"
+        referenced.write_bytes(b"hidden media")
+        unreferenced.write_bytes(b"temporary data")
+        (self.vault / "note.md").write_text("![[Incoming/.hidden.jpg]]", encoding="utf-8")
+        self.assertEqual(import_vault(self.vault), [])
+        self.assertEqual(referenced.read_bytes(), b"hidden media")
+        self.assertEqual(unreferenced.read_bytes(), b"temporary data")
+        self.assertFalse((self.vault / "objects").exists())
+
+    def test_temporary_and_unsupported_extensions_are_skipped_even_when_referenced(self):
+        temporary = self.vault / "Incoming" / "video.mp4.tmp"
+        unsupported = self.vault / "Incoming" / "document.txt"
+        custom = self.vault / "Incoming" / "clip.custom"
+        temporary.write_bytes(b"temporary")
+        unsupported.write_bytes(b"text")
+        custom.write_bytes(b"custom video mime")
+        (self.vault / "note.md").write_text(
+            "![[Incoming/video.mp4.tmp]]\n![[Incoming/document.txt]]\n![[Incoming/clip.custom]]",
+            encoding="utf-8",
+        )
+        with mock.patch("madobsidian.video_previews.mimetypes.guess_type", return_value=("video/x-custom", None)):
+            self.assertEqual(import_vault(self.vault), [])
+        self.assertTrue(temporary.is_file())
+        self.assertTrue(unsupported.is_file())
+        self.assertTrue(custom.is_file())
+        self.assertFalse((self.vault / "objects").exists())
+
+    def test_ambiguity_is_preserved_for_referenced_media_candidates(self):
+        composed_name = "café.jpg"
+        decomposed_name = "cafe\u0301.jpg"
+        first = self.vault / "Incoming" / composed_name
+        second = self.vault / "Incoming" / decomposed_name
+        first.write_bytes(b"first")
+        if second.exists():
+            self.skipTest("filesystem normalizes the two Unicode filename forms")
+        second.write_bytes(b"second")
+        note = self.vault / "note.md"
+        note.write_text(
+            f"![[Incoming/{composed_name}]]\n![[Incoming/{decomposed_name}]]\n[[{composed_name}]]",
+            encoding="utf-8",
+        )
+        with self._without_previews()[0], self._without_previews()[1]:
+            rows = import_vault(self.vault)
+        self.assertEqual(len(rows), 2)
+        self.assertIn("[[café.jpg]]", note.read_text(encoding="utf-8"))
+        self.assertEqual(sum(len(row["ambiguities"]) for row in rows), 1)
+
+    def test_basename_only_unicode_ambiguity_keeps_both_candidates(self):
+        composed_name = "caf\u00e9.jpg"
+        decomposed_name = "cafe\u0301.jpg"
+        first = self.vault / "Incoming" / composed_name
+        second = self.vault / "Incoming" / decomposed_name
+        first.write_bytes(b"first original")
+        if second.exists():
+            self.skipTest("filesystem normalizes the two Unicode filename forms")
+        second.write_bytes(b"second original")
+        note = self.vault / "note.md"
+        original_reference = f"![[{composed_name}]]"
+        note.write_text(original_reference, encoding="utf-8")
+
+        with self._without_previews()[0], self._without_previews()[1]:
+            rows = import_vault(self.vault)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(note.read_text(encoding="utf-8"), original_reference)
+        ambiguities = [ambiguity for row in rows for ambiguity in row["ambiguities"]]
+        self.assertEqual(len(ambiguities), 1)
+        self.assertEqual(set(ambiguities[0]["candidates"]), {composed_name, decomposed_name})
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertEqual(len(list((self.vault / "objects").glob("[0-9a-f]*/shared/*.jpg"))), 2)
+
     def test_note_failure_keeps_source_and_rerun_recovers_without_duplicate(self):
-        source = self.vault / "Incoming" / "recover.txt"
+        source = self.vault / "Incoming" / "recover.jpg"
         source.write_text("recover me", encoding="utf-8")
         note = self.vault / "note.md"
-        note.write_text("![[Incoming/recover.txt]]", encoding="utf-8")
+        note.write_text("![[Incoming/recover.jpg]]", encoding="utf-8")
         with mock.patch("madobsidian.importer._atomic_text", side_effect=OSError("simulated note failure")):
             with self.assertRaises(OSError):
                 import_vault(self.vault)
         self.assertFalse(source.exists())
-        self.assertEqual((self.vault / "objects" / list((self.vault / "objects").glob("[0-9a-f]*"))[0].name / "shared" / "recover.txt").read_text(encoding="utf-8"), "recover me")
+        self.assertEqual((self.vault / "objects" / list((self.vault / "objects").glob("[0-9a-f]*"))[0].name / "shared" / "recover.jpg").read_text(encoding="utf-8"), "recover me")
         self.assertEqual(len(list((self.vault / "objects").iterdir())), 1)
         import_vault(self.vault)
         self.assertFalse(source.exists())
@@ -103,8 +201,9 @@ class VaultImportTests(unittest.TestCase):
         return record
 
     def test_source_inspection_failure_is_logged_once(self):
-        source = self.vault / "Incoming" / "hash-error.txt"
+        source = self.vault / "Incoming" / "hash-error.jpg"
         source.write_bytes(b"source")
+        (self.vault / "note.md").write_text("![[Incoming/hash-error.jpg]]", encoding="utf-8")
         with mock.patch("madobsidian.importer._sha256", side_effect=OSError("source hash failed")):
             with self.assertRaisesRegex(OSError, "source hash failed"):
                 import_vault(self.vault)
@@ -113,7 +212,7 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), b"source")
 
     def test_markdown_planning_failure_is_logged_once(self):
-        source = self.vault / "Incoming" / "markdown-error.txt"
+        source = self.vault / "Incoming" / "markdown-error.jpg"
         source.write_bytes(b"source")
         with mock.patch("madobsidian.importer._markdown_plan", side_effect=OSError("markdown read failed")):
             with self.assertRaisesRegex(OSError, "markdown read failed"):
@@ -123,8 +222,9 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), b"source")
 
     def test_objects_directory_setup_failure_is_logged_once(self):
-        source = self.vault / "Incoming" / "objects-error.txt"
+        source = self.vault / "Incoming" / "objects-error.jpg"
         source.write_bytes(b"source")
+        (self.vault / "note.md").write_text("![[Incoming/objects-error.jpg]]", encoding="utf-8")
         path_type = type(source)
         real_mkdir = path_type.mkdir
 
@@ -141,11 +241,11 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), b"source")
 
     def test_partial_note_updates_recover_and_preserve_unrelated_edits(self):
-        source = self.vault / "Incoming" / "multi.txt"
+        source = self.vault / "Incoming" / "multi.jpg"
         source.write_bytes(b"data")
         first, second = self.vault / "a.md", self.vault / "b.md"
-        first.write_text("![[Incoming/multi.txt]]", encoding="utf-8")
-        second.write_text("[[Incoming/multi.txt]]", encoding="utf-8")
+        first.write_text("![[Incoming/multi.jpg]]", encoding="utf-8")
+        second.write_text("[[Incoming/multi.jpg]]", encoding="utf-8")
         real_write = importer._atomic_text
         calls = 0
 
@@ -162,9 +262,9 @@ class VaultImportTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 import_vault(self.vault)
         self.assertFalse(source.exists())
-        self.assertEqual(len(list((self.vault / "objects").glob("*/shared/multi.txt"))), 1)
+        self.assertEqual(len(list((self.vault / "objects").glob("*/shared/multi.jpg"))), 1)
         self.assertIn("objects/", first.read_text(encoding="utf-8"))
-        self.assertIn("Incoming/multi.txt", second.read_text(encoding="utf-8"))
+        self.assertIn("Incoming/multi.jpg", second.read_text(encoding="utf-8"))
         second.write_text(second.read_text(encoding="utf-8") + "\nUser note retained.\n", encoding="utf-8")
         import_vault(self.vault)
         self.assertFalse(source.exists())
@@ -172,28 +272,28 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(len(list((self.vault / "objects").glob("[0-9a-f]*"))), 1)
 
     def test_changed_reference_conflicts_without_overwriting_user_edit(self):
-        source = self.vault / "Incoming" / "conflict.txt"
+        source = self.vault / "Incoming" / "conflict.jpg"
         source.write_text("data", encoding="utf-8")
         note = self.vault / "note.md"
-        note.write_text("[[Incoming/conflict.txt]]", encoding="utf-8")
+        note.write_text("[[Incoming/conflict.jpg]]", encoding="utf-8")
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._atomic_text", side_effect=OSError("stop before edit")
         ):
             with self.assertRaises(OSError):
                 import_vault(self.vault)
-        note.write_text("[[Incoming/renamed-by-user.txt]]", encoding="utf-8")
+        note.write_text("[[Incoming/renamed-by-user.jpg]]", encoding="utf-8")
         with self.assertRaisesRegex(importer.ImportError, "recovery conflict"):
             import_vault(self.vault)
         self.assertFalse(source.exists())
-        self.assertEqual(len(list((self.vault / "objects").glob("*/shared/conflict.txt"))), 1)
-        self.assertEqual(note.read_text(encoding="utf-8"), "[[Incoming/renamed-by-user.txt]]")
+        self.assertEqual(len(list((self.vault / "objects").glob("*/shared/conflict.jpg"))), 1)
+        self.assertEqual(note.read_text(encoding="utf-8"), "[[Incoming/renamed-by-user.jpg]]")
         self.assertTrue(list((self.vault / "objects").glob("*/transaction.json")))
 
     def test_recovery_after_note_edits_before_journal_cleanup_is_idempotent(self):
-        source = self.vault / "Incoming" / "after-notes.txt"
+        source = self.vault / "Incoming" / "after-notes.jpg"
         source.write_bytes(b"x" * 256_000)
         note = self.vault / "note.md"
-        note.write_text("![[Incoming/after-notes.txt]]", encoding="utf-8")
+        note.write_text("![[Incoming/after-notes.jpg]]", encoding="utf-8")
         real_unlink = Path.unlink
 
         def fail_journal_unlink(path, *args, **kwargs):
@@ -209,14 +309,14 @@ class VaultImportTests(unittest.TestCase):
         first_text = note.read_text(encoding="utf-8")
         self.assertEqual(first_text.count("madobsidian://"), 1)
         self.assertFalse(source.exists())
-        self.assertEqual(len(list((self.vault / "objects").glob("*/originals/after-notes.txt"))), 1)
+        self.assertEqual(len(list((self.vault / "objects").glob("*/originals/after-notes.jpg"))), 1)
         import_vault(self.vault)
         self.assertFalse(source.exists())
         final_text = note.read_text(encoding="utf-8")
         self.assertEqual(final_text.count("objects/"), 1)
         self.assertEqual(final_text.count("madobsidian://"), 1)
 
-    def _leave_pending_import(self, filename="pending.txt"):
+    def _leave_pending_import(self, filename="pending.jpg"):
         source = self.vault / "Incoming" / filename
         source.write_text("pending bytes", encoding="utf-8")
         note = self.vault / "note.md"
@@ -237,7 +337,7 @@ class VaultImportTests(unittest.TestCase):
         with self.assertRaisesRegex(importer.ImportError, "outside the configured objects directory"):
             import_vault(self.vault, config=config)
         self.assertFalse(source.exists())
-        self.assertEqual(len(list((self.vault / "objects").glob("*/shared/pending.txt"))), 1)
+        self.assertEqual(len(list((self.vault / "objects").glob("*/shared/pending.jpg"))), 1)
         self.assertFalse((self.vault / "archive-v2").exists())
         self.assertEqual(len(list((self.vault / "objects").glob("*/transaction.json"))), 1)
 
@@ -263,10 +363,10 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(len(list((self.vault / "objects").glob("*/transaction.json"))), 1)
 
     def test_dry_run_reports_pending_recovery_without_mutating(self):
-        source = self.vault / "Incoming" / "pending.txt"
+        source = self.vault / "Incoming" / "pending.jpg"
         source.write_text("data", encoding="utf-8")
         note = self.vault / "note.md"
-        note.write_text("[[Incoming/pending.txt]]", encoding="utf-8")
+        note.write_text("[[Incoming/pending.jpg]]", encoding="utf-8")
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._atomic_text", side_effect=OSError("leave a pending transaction")
         ):
@@ -282,22 +382,23 @@ class VaultImportTests(unittest.TestCase):
     def test_configured_incoming_directory_is_used_for_path_matching(self):
         media = self.vault / "Media"
         media.mkdir()
-        source = media / "clip.txt"
+        source = media / "clip.jpg"
         source.write_text("media", encoding="utf-8")
         note = self.vault / "note.md"
-        note.write_text("[[Media/clip.txt]]\n[[Incoming/clip.txt]]", encoding="utf-8")
+        note.write_text("[[Media/clip.jpg]]\n[[Incoming/clip.jpg]]", encoding="utf-8")
         config_path = self.vault / "settings.ini"
         config_path.write_text("[general]\nincoming_directory = Media\n", encoding="utf-8")
         with self._without_previews()[0], self._without_previews()[1]:
             result = import_vault(self.vault, config=load_config(config_path))[0]
         content = note.read_text(encoding="utf-8")
-        self.assertIn(f"objects/{result['id']}/shared/clip.txt", content)
-        self.assertIn("[[Incoming/clip.txt]]", content)
+        self.assertIn(f"objects/{result['id']}/shared/clip.jpg", content)
+        self.assertIn("[[Incoming/clip.jpg]]", content)
         self.assertFalse(source.exists())
 
     def test_post_move_hash_mismatch_preserves_original_in_staging(self):
-        source = self.vault / "Incoming" / "mismatch.txt"
+        source = self.vault / "Incoming" / "mismatch.jpg"
         source.write_bytes(b"preserve after mismatch")
+        (self.vault / "note.md").write_text("![[Incoming/mismatch.jpg]]", encoding="utf-8")
         real_hash = importer._sha256
 
         def mismatch_staged(path):
@@ -311,13 +412,14 @@ class VaultImportTests(unittest.TestCase):
             with self.assertRaisesRegex(importer.ImportError, "Moved file failed SHA-256"):
                 import_vault(self.vault)
         self.assertFalse(source.exists())
-        staged = list((self.vault / "objects").glob(".incomplete-*/shared/mismatch.txt"))
+        staged = list((self.vault / "objects").glob(".incomplete-*/shared/mismatch.jpg"))
         self.assertEqual(len(staged), 1)
         self.assertEqual(staged[0].read_bytes(), b"preserve after mismatch")
 
     def test_interruption_immediately_after_move_is_recoverable_and_repeatable(self):
-        source = self.vault / "Incoming" / "immediate.txt"
+        source = self.vault / "Incoming" / "immediate.jpg"
         source.write_bytes(b"moved before verification")
+        (self.vault / "note.md").write_text("![[Incoming/immediate.jpg]]", encoding="utf-8")
         real_hash = importer._sha256
 
         def interrupt_hash(path):
@@ -339,8 +441,9 @@ class VaultImportTests(unittest.TestCase):
         self.assertFalse(list((self.vault / "objects").glob(".incomplete-*")))
 
     def test_exception_after_move_preserves_stage_when_expected_target_disappears(self):
-        source = self.vault / "Incoming" / "displaced.txt"
+        source = self.vault / "Incoming" / "displaced.jpg"
         source.write_bytes(b"original moved to an unexpected staging path")
+        (self.vault / "note.md").write_text("![[Incoming/displaced.jpg]]", encoding="utf-8")
         path_type = type(source)
         real_rename = path_type.rename
 
@@ -369,10 +472,10 @@ class VaultImportTests(unittest.TestCase):
         self.assertTrue((stages[0] / "transaction.json").is_file())
 
     def test_failed_rename_preserves_source_notes_and_logs_once_in_vault_parent(self):
-        source = self.vault / "Incoming" / "rename-error.txt"
+        source = self.vault / "Incoming" / "rename-error.jpg"
         source.write_bytes(b"original remains")
         note = self.vault / "note.md"
-        note.write_text("![[Incoming/rename-error.txt]]\n", encoding="utf-8")
+        note.write_text("![[Incoming/rename-error.jpg]]\n", encoding="utf-8")
         original_note = note.read_bytes()
         path_type = type(source)
         real_rename = path_type.rename
@@ -405,8 +508,9 @@ class VaultImportTests(unittest.TestCase):
         self.assertIsNotNone(datetime.fromisoformat(record["timestamp"]).utcoffset())
 
     def test_log_failure_does_not_mask_failed_rename(self):
-        source = self.vault / "Incoming" / "log-error.txt"
+        source = self.vault / "Incoming" / "log-error.jpg"
         source.write_bytes(b"keep me")
+        (self.vault / "note.md").write_text("![[Incoming/log-error.jpg]]", encoding="utf-8")
         path_type = type(source)
         real_rename = path_type.rename
         real_open = path_type.open
@@ -429,8 +533,9 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), b"keep me")
 
     def test_recovery_after_verified_move_before_preview_processing(self):
-        source = self.vault / "Incoming" / "verified-move.txt"
+        source = self.vault / "Incoming" / "verified-move.jpg"
         source.write_bytes(b"verified then interrupted")
+        (self.vault / "note.md").write_text("![[Incoming/verified-move.jpg]]", encoding="utf-8")
         real_write_journal = importer._write_journal
 
         def interrupt_after_move(path, data):
@@ -451,8 +556,9 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(repeated, [])
 
     def test_abandoned_staging_is_removed_only_with_verified_source(self):
-        source = self.vault / "Incoming" / "staged.txt"
+        source = self.vault / "Incoming" / "staged.jpg"
         source.write_bytes(b"verified")
+        (self.vault / "note.md").write_text("![[Incoming/staged.jpg]]", encoding="utf-8")
         staging = self.vault / "objects" / ".incomplete-crash"
         (staging / "shared").mkdir(parents=True)
         (staging / "shared" / source.name).write_bytes(source.read_bytes())
@@ -463,8 +569,9 @@ class VaultImportTests(unittest.TestCase):
         self.assertTrue((self.vault / result["target"]).is_file())
 
     def test_legacy_incomplete_root_copy_requires_matching_source(self):
-        source = self.vault / "Incoming" / "old-layout.txt"
+        source = self.vault / "Incoming" / "old-layout.jpg"
         source.write_bytes(b"old bytes")
+        (self.vault / "note.md").write_text("![[Incoming/old-layout.jpg]]", encoding="utf-8")
         staging = self.vault / "objects" / ".incomplete-legacy"
         staging.mkdir(parents=True)
         (staging / source.name).write_bytes(b"old bytes")
@@ -474,14 +581,14 @@ class VaultImportTests(unittest.TestCase):
         self.assertFalse(source.exists())
 
     def test_unverified_staging_is_preserved_when_source_changed(self):
-        source = self.vault / "Incoming" / "stale.txt"
+        source = self.vault / "Incoming" / "stale.jpg"
         source.write_bytes(b"new source")
         staging = self.vault / "objects" / ".incomplete-unverified"
         (staging / "shared").mkdir(parents=True)
         (staging / "shared" / source.name).write_bytes(b"old archived source")
         old = b"old archived source"
-        journal = {"id": "00000000-0000-4000-8000-000000000001", "source": "Incoming/stale.txt",
-                   "original_path": "shared/stale.txt", "sha256": hashlib.sha256(old).hexdigest(),
+        journal = {"id": "00000000-0000-4000-8000-000000000001", "source": "Incoming/stale.jpg",
+                   "original_path": "shared/stale.jpg", "sha256": hashlib.sha256(old).hexdigest(),
                    "size_bytes": len(old), "markdown": {}, "phase": "moving", "source_mode": "move"}
         (staging / "transaction.json").write_text(json.dumps(journal), encoding="utf-8")
         with self.assertRaises(importer.ImportError):
@@ -490,15 +597,15 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual((staging / "shared" / source.name).read_bytes(), old)
 
     def test_legacy_copy_mode_journal_is_rejected_without_recovery_actions(self):
-        source = self.vault / "Incoming" / "old-journal.txt"
+        source = self.vault / "Incoming" / "old-journal.jpg"
         source.write_bytes(b"incoming original")
         staging = self.vault / "objects" / ".incomplete-old-journal"
         (staging / "shared").mkdir(parents=True)
         (staging / "shared" / source.name).write_bytes(b"staged copy")
         journal = {
             "id": "00000000-0000-4000-8000-000000000001",
-            "source": "Incoming/old-journal.txt",
-            "original_path": "shared/old-journal.txt",
+            "source": "Incoming/old-journal.jpg",
+            "original_path": "shared/old-journal.jpg",
             "sha256": hashlib.sha256(b"staged copy").hexdigest(),
             "size_bytes": len(b"staged copy"),
             "markdown": {},
@@ -513,15 +620,15 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual((staging / "shared" / source.name).read_bytes(), b"staged copy")
 
     def test_malformed_journal_paths_cannot_touch_external_files(self):
-        source = self.vault / "Incoming" / "safe.txt"
+        source = self.vault / "Incoming" / "safe.jpg"
         source.write_bytes(b"safe")
-        external = self.vault.parent / "outside.txt"
+        external = self.vault.parent / "outside.jpg"
         external.write_bytes(b"must survive")
         obj = self.vault / "objects" / "00000000-0000-4000-8000-000000000001"
         (obj / "shared").mkdir(parents=True)
-        original = obj / "shared" / "safe.txt"
+        original = obj / "shared" / "safe.jpg"
         original.write_bytes(b"safe")
-        record = {"id": obj.name, "source": "../outside.txt", "original_path": "shared/safe.txt",
+        record = {"id": obj.name, "source": "../outside.jpg", "original_path": "shared/safe.jpg",
                   "sha256": hashlib.sha256(b"safe").hexdigest(), "size_bytes": 4,
                   "markdown": {}, "phase": "published"}
         (obj / "transaction.json").write_text(json.dumps(record), encoding="utf-8")
@@ -554,17 +661,17 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(updated.count("objects/"), 1)
 
     def test_crlf_newline_style_is_preserved(self):
-        source = self.vault / "Incoming" / "line.txt"
+        source = self.vault / "Incoming" / "line.jpg"
         source.write_text("x", encoding="utf-8")
         note = self.vault / "note.md"
-        note.write_bytes(b"first\r\n![[Incoming/line.txt]]\r\nlast\r\n")
+        note.write_bytes(b"first\r\n![[Incoming/line.jpg]]\r\nlast\r\n")
         with self._without_previews()[0], self._without_previews()[1]:
             import_vault(self.vault)
         raw = note.read_bytes()
         self.assertIn(b"\r\n", raw)
         self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
 
-    def test_video_extensions_and_mime_detection_choose_mp4_preview(self):
+    def test_supported_video_extensions_choose_mp4_preview(self):
         for name in ("clip.3gp", "clip.flv"):
             incoming = self.vault / "Incoming" / name
             incoming.write_text("x", encoding="utf-8")
@@ -572,12 +679,6 @@ class VaultImportTests(unittest.TestCase):
             plan = importer._markdown_plan(self.vault, name, "00000000-0000-4000-8000-000000000001", True)
             self.assertIn("preview.mp4", json.dumps(plan))
             incoming.unlink()
-        with mock.patch("madobsidian.video_previews.mimetypes.guess_type", return_value=("video/x-custom", None)):
-            incoming = self.vault / "Incoming" / "clip.custom"
-            incoming.write_text("x", encoding="utf-8")
-            (self.vault / "note.md").write_text("![[Incoming/clip.custom]]", encoding="utf-8")
-            plan = importer._markdown_plan(self.vault, "clip.custom", "00000000-0000-4000-8000-000000000001", True)
-            self.assertIn("preview.mp4", json.dumps(plan))
 
     def test_unique_basename_reference_rewrites_with_alias_and_heading(self):
         source = self.vault / "Incoming" / "unique.jpg"
@@ -618,15 +719,15 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(note.read_text(encoding="utf-8"), original)
 
     def test_dry_run_and_actual_import_share_basename_matching(self):
-        source = self.vault / "Incoming" / "same-match.txt"
+        source = self.vault / "Incoming" / "same-match.jpg"
         source.write_text("data", encoding="utf-8")
         note = self.vault / "note.md"
-        note.write_text("[[same-match.txt]]", encoding="utf-8")
+        note.write_text("[[same-match.jpg]]", encoding="utf-8")
         dry_rows = import_vault(self.vault, dry_run=True)
         self.assertIn("note.md", dry_rows[0]["changes"])
         with self._without_previews()[0], self._without_previews()[1]:
             actual = import_vault(self.vault)[0]
-        self.assertIn(f"objects/{actual['id']}/shared/same-match.txt", note.read_text(encoding="utf-8"))
+        self.assertIn(f"objects/{actual['id']}/shared/same-match.jpg", note.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
