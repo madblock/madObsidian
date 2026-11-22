@@ -90,11 +90,12 @@ previews, so `verify` and `rebuild-index` need these tools when such objects exi
 Vault import reads regular files directly under the configured Incoming
 directory only; it never imports arbitrary vault files or nested directories.
 It records the source hash, moves the source into an unpublished staging object
-(using rename on the same filesystem), verifies the moved file, then generates
-previews and metadata. After publishing the object, it updates notes and clears
-the transaction journal. A cross-filesystem fallback copies and verifies the
-destination before removing the Incoming entry. For compatibility, the
-two-argument form remains a copy-only legacy importer.
+using `Path.rename()`, verifies the moved file, then generates previews and metadata.
+The source and destination must be on the same filesystem. If the rename fails,
+the import is aborted: the original remains in Incoming, no object is published,
+and Markdown is not modified. Failed imports are logged to `import.log` beside
+the vault directory. For compatibility, the two-argument form remains a copy-only
+legacy importer.
 
 Vault objects use this layout (empty original directories are omitted):
 
@@ -133,8 +134,7 @@ returns a verified moved original from staging to Incoming and discards the
 unpublished stage; after publication, it replays the targeted note edits and
 finalizes the journal. Recovery is repeatable. If both copies exist, it retains
 the verified Incoming copy before discarding staging; if neither verifies, it
-preserves the stage and stops for investigation. Legacy copy-mode journals
-remain readable and retain their former cleanup behavior. `verify` and
+preserves the stage and stops for investigation. `verify` and
 `rebuild-index` reject unfinished journals and incomplete objects. Markdown code
 blocks and inline code are left unchanged; path and basename comparisons use
 Unicode NFC normalization. Markdown newline style is preserved.
