@@ -6,6 +6,7 @@ import json
 import math
 import mimetypes
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -237,27 +238,33 @@ def _fit_dimensions(width: int, height: int, max_dimension: int = MAX_VIDEO_PREV
 
 
 def _wrap_text(text: str, font: ImageFont.FreeTypeFont, width: int) -> list[str]:
-    lines: list[str] = []
-    current = ""
-    for word in text.split(" "):
-        candidate = f"{current} {word}" if current else word
-        if font.getlength(candidate) <= width:
-            current = candidate
-            continue
+    def wrap_paragraph(paragraph: str) -> list[str]:
+        lines: list[str] = []
+        current = ""
+        for word in paragraph.split(" "):
+            candidate = f"{current} {word}" if current else word
+            if font.getlength(candidate) <= width:
+                current = candidate
+                continue
+            if current:
+                lines.append(current)
+                current = ""
+            piece = ""
+            for character in word:
+                if piece and font.getlength(piece + character) > width:
+                    lines.append(piece)
+                    piece = character
+                else:
+                    piece += character
+            current = piece
         if current:
             lines.append(current)
-            current = ""
-        piece = ""
-        for character in word:
-            if piece and font.getlength(piece + character) > width:
-                lines.append(piece)
-                piece = character
-            else:
-                piece += character
-        current = piece
-    if current:
-        lines.append(current)
-    return lines or [""]
+        return lines or [""]
+
+    lines: list[str] = []
+    for paragraph in re.split(r"\r\n|\r|\n", text):
+        lines.extend(wrap_paragraph(paragraph))
+    return lines
 
 
 def _write_watermark(

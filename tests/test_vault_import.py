@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -20,6 +21,13 @@ class VaultImportTests(unittest.TestCase):
         self.vault = Path(self.temp.name) / "vault"
         (self.vault / "Incoming").mkdir(parents=True)
         (self.vault / "Folder").mkdir()
+        self.local_state = Path(self.temp.name) / "local-state"
+        self.state_environment = mock.patch.dict(
+            os.environ,
+            {"APPDATA": str(self.local_state), "XDG_CONFIG_HOME": str(self.local_state)},
+        )
+        self.state_environment.start()
+        self.addCleanup(self.state_environment.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -175,8 +183,8 @@ class VaultImportTests(unittest.TestCase):
         note = self.vault / "note.md"
         note.write_text("![[Incoming/recover.jpg]]", encoding="utf-8")
         with mock.patch("madobsidian.importer._atomic_text", side_effect=OSError("simulated note failure")):
-            with self.assertRaises(OSError):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         self.assertFalse(source.exists())
         self.assertEqual((self.vault / "objects" / list((self.vault / "objects").glob("[0-9a-f]*"))[0].name / "shared" / "recover.jpg").read_text(encoding="utf-8"), "recover me")
         self.assertEqual(len(list((self.vault / "objects").iterdir())), 1)
@@ -205,8 +213,8 @@ class VaultImportTests(unittest.TestCase):
         source.write_bytes(b"source")
         (self.vault / "note.md").write_text("![[Incoming/hash-error.jpg]]", encoding="utf-8")
         with mock.patch("madobsidian.importer._sha256", side_effect=OSError("source hash failed")):
-            with self.assertRaisesRegex(OSError, "source hash failed"):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         record = self._assert_one_file_error_log_record(source)
         self.assertIn("source hash failed", record["description"])
         self.assertEqual(source.read_bytes(), b"source")
@@ -215,8 +223,8 @@ class VaultImportTests(unittest.TestCase):
         source = self.vault / "Incoming" / "markdown-error.jpg"
         source.write_bytes(b"source")
         with mock.patch("madobsidian.importer._markdown_plan", side_effect=OSError("markdown read failed")):
-            with self.assertRaisesRegex(OSError, "markdown read failed"):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         record = self._assert_one_file_error_log_record(source)
         self.assertIn("markdown read failed", record["description"])
         self.assertEqual(source.read_bytes(), b"source")
@@ -234,8 +242,8 @@ class VaultImportTests(unittest.TestCase):
             return real_mkdir(path, *args, **kwargs)
 
         with mock.patch.object(path_type, "mkdir", autospec=True, side_effect=fail_objects_setup):
-            with self.assertRaisesRegex(OSError, "objects directory unavailable"):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         record = self._assert_one_file_error_log_record(source)
         self.assertIn("objects directory unavailable", record["description"])
         self.assertEqual(source.read_bytes(), b"source")
@@ -259,8 +267,8 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._atomic_text", side_effect=write_then_crash
         ):
-            with self.assertRaises(OSError):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         self.assertFalse(source.exists())
         self.assertEqual(len(list((self.vault / "objects").glob("*/shared/multi.jpg"))), 1)
         self.assertIn("objects/", first.read_text(encoding="utf-8"))
@@ -279,8 +287,8 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._atomic_text", side_effect=OSError("stop before edit")
         ):
-            with self.assertRaises(OSError):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         note.write_text("[[Incoming/renamed-by-user.jpg]]", encoding="utf-8")
         with self.assertRaisesRegex(importer.ImportError, "recovery conflict"):
             import_vault(self.vault)
@@ -304,8 +312,8 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch.object(
             Path, "unlink", fail_journal_unlink
         ):
-            with self.assertRaises(OSError):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         first_text = note.read_text(encoding="utf-8")
         self.assertEqual(first_text.count("madobsidian://"), 1)
         self.assertFalse(source.exists())
@@ -324,8 +332,8 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._atomic_text", side_effect=OSError("simulated interruption")
         ):
-            with self.assertRaises(OSError):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         self.assertFalse(source.exists())
         return source
 
@@ -370,8 +378,8 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._atomic_text", side_effect=OSError("leave a pending transaction")
         ):
-            with self.assertRaises(OSError):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
         before = {p.relative_to(self.vault).as_posix(): p.read_bytes() for p in self.vault.rglob("*") if p.is_file()}
         rows = import_vault(self.vault, dry_run=True)
         after = {p.relative_to(self.vault).as_posix(): p.read_bytes() for p in self.vault.rglob("*") if p.is_file()}
@@ -409,8 +417,9 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._sha256", side_effect=mismatch_staged
         ):
-            with self.assertRaisesRegex(importer.ImportError, "Moved file failed SHA-256"):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
+        self.assertTrue(failed.failures[0]["serious"])
         self.assertFalse(source.exists())
         staged = list((self.vault / "objects").glob(".incomplete-*/shared/mismatch.jpg"))
         self.assertEqual(len(staged), 1)
@@ -430,8 +439,9 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._sha256", side_effect=interrupt_hash
         ):
-            with self.assertRaisesRegex(OSError, "immediately after rename"):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
+        self.assertTrue(failed.failures[0]["serious"])
         self.assertFalse(source.exists())
         recovered, _ = importer.recover_transactions(self.vault)
         self.assertEqual(len(recovered), 1)
@@ -458,8 +468,9 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch.object(
             path_type, "rename", autospec=True, side_effect=move_then_displace
         ):
-            with self.assertRaisesRegex(OSError, "target displacement"):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
+        self.assertTrue(failed.failures[0]["serious"])
 
         stages = list((self.vault / "objects").glob(".incomplete-*"))
         self.assertEqual(len(stages), 1)
@@ -490,8 +501,8 @@ class VaultImportTests(unittest.TestCase):
         ), mock.patch.object(path_type, "rename", autospec=True, side_effect=fail_source_rename), mock.patch(
             "madobsidian.importer.shutil.copyfile", side_effect=AssertionError("copy fallback must not run")
         ):
-            with self.assertRaisesRegex(OSError, "simulated rename denied"):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
 
         self.assertEqual(source.read_bytes(), b"original remains")
         self.assertEqual(note.read_bytes(), original_note)
@@ -528,8 +539,9 @@ class VaultImportTests(unittest.TestCase):
         with mock.patch.object(path_type, "rename", autospec=True, side_effect=fail_source_rename), mock.patch.object(
             path_type, "open", autospec=True, side_effect=fail_log_open
         ):
-            with self.assertRaisesRegex(OSError, "original rename failure"):
-                import_vault(self.vault)
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
+        self.assertIn("original rename failure", failed.failures[0]["reason"])
         self.assertEqual(source.read_bytes(), b"keep me")
 
     def test_recovery_after_verified_move_before_preview_processing(self):
@@ -546,11 +558,13 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1], mock.patch(
             "madobsidian.importer._write_journal", side_effect=interrupt_after_move
         ):
-            with self.assertRaisesRegex(OSError, "after verified move"):
-                import_vault(self.vault)
-        self.assertFalse(source.exists())
+            failed = import_vault(self.vault)
+        self.assertEqual(len(failed.failures), 1)
+        self.assertFalse(failed.failures[0]["serious"])
+        self.assertTrue(source.exists())
+        self.assertFalse(list((self.vault / "objects").glob(".incomplete-*")))
         recovered, _ = importer.recover_transactions(self.vault)
-        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered, [])
         self.assertEqual(source.read_bytes(), b"verified then interrupted")
         repeated, _ = importer.recover_transactions(self.vault)
         self.assertEqual(repeated, [])
@@ -595,6 +609,99 @@ class VaultImportTests(unittest.TestCase):
             import_vault(self.vault)
         self.assertEqual(source.read_bytes(), b"new source")
         self.assertEqual((staging / "shared" / source.name).read_bytes(), old)
+
+    def _leave_immediate_move_pending(self, filename="target.jpg"):
+        source = self.vault / "Incoming" / filename
+        original = b"pending bytes"
+        source.write_bytes(original)
+        (self.vault / "note.md").write_text(
+            f"![[Incoming/{filename}]]", encoding="utf-8"
+        )
+        real_hash = importer._sha256
+
+        def interrupt_hash(path):
+            if path.name == source.name and any(
+                part.startswith(".incomplete-") for part in path.parts
+            ):
+                raise OSError("simulated interruption immediately after rename")
+            return real_hash(path)
+
+        with self._without_previews()[0], self._without_previews()[1], mock.patch(
+            "madobsidian.importer._sha256", side_effect=interrupt_hash
+        ):
+            failed = import_vault(self.vault)
+
+        self.assertEqual(len(failed.failures), 1)
+        self.assertFalse(source.exists())
+        self.assertEqual(
+            len(list((self.vault / "objects").glob(".incomplete-*/transaction.json"))),
+            1,
+        )
+        return source, original
+
+    def test_targeted_recovery_skips_unrelated_malformed_journal(self):
+        source, original = self._leave_immediate_move_pending("target.jpg")
+
+        unrelated = self.vault / "objects" / ".incomplete-unrelated"
+        unrelated.mkdir()
+        (unrelated / "transaction.json").write_text(
+            json.dumps({
+                "id": "not-a-uuid",
+                "source": "Incoming/unrelated.jpg",
+            }),
+            encoding="utf-8",
+        )
+
+        recovered, _ = importer.recover_transactions(
+            self.vault, only_source="Incoming/target.jpg"
+        )
+
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertTrue((unrelated / "transaction.json").exists())
+
+    def test_targeted_recovery_rejects_malformed_matching_journal(self):
+        source, _ = self._leave_immediate_move_pending("target.jpg")
+
+        journals = list(
+            (self.vault / "objects").glob(".incomplete-*/transaction.json")
+        )
+        self.assertEqual(len(journals), 1)
+
+        journal_path = journals[0]
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        journal["id"] = "not-a-uuid"
+        journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+        with self.assertRaisesRegex(importer.ImportError, "invalid UUID"):
+            importer.recover_transactions(
+                self.vault, only_source="Incoming/target.jpg"
+            )
+
+        self.assertFalse(source.exists())
+        self.assertTrue(journal_path.exists())
+
+    def test_unfiltered_recovery_still_rejects_unrelated_malformed_journal(self):
+        source, original = self._leave_immediate_move_pending("target.jpg")
+
+        unrelated = self.vault / "objects" / ".incomplete-unrelated"
+        unrelated.mkdir()
+        (unrelated / "transaction.json").write_text(
+            json.dumps({
+                "id": "not-a-uuid",
+                "source": "Incoming/unrelated.jpg",
+            }),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            importer.ImportError, "Malformed transaction journal"
+        ):
+            importer.recover_transactions(self.vault)
+
+        self.assertTrue(source.exists())
+        self.assertEqual(source.read_bytes(), original)
+        self.assertTrue((unrelated / "transaction.json").exists())
 
     def test_legacy_copy_mode_journal_is_rejected_without_recovery_actions(self):
         source = self.vault / "Incoming" / "old-journal.jpg"

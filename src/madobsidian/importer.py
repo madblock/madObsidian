@@ -39,6 +39,15 @@ class ImportResult:
     object_path: Path
 
 
+class ImportBatchResult(list[dict[str, object]]):
+    """List-compatible successful/planned rows with explicit batch outcomes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.skipped: list[dict[str, str]] = []
+        self.failures: list[dict[str, str | bool]] = []
+
+
 class ImportError(Exception):
     """Raised when an item cannot be safely imported."""
 
@@ -411,14 +420,22 @@ def _safe_relative(root: Path, value: object, *, label: str) -> Path:
     return candidate
 
 
-def _read_transaction(manifest: Path, vault: Path, object_dir: Path, incoming_directory: str,
-                      threshold: int) -> dict[str, object]:
+def _load_transaction_json(manifest: Path) -> dict[str, object]:
     if manifest.is_symlink() or not manifest.is_file():
         raise ImportError(f"Transaction journal is missing, dangling, or unsafe: {manifest}")
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ImportError(f"Cannot read recovery journal {manifest}: {error}") from error
+    if not isinstance(data, dict):
+        raise ImportError(f"Malformed transaction journal: {manifest}")
+    return data
+
+
+def _read_transaction(manifest: Path, vault: Path, object_dir: Path, incoming_directory: str,
+                      threshold: int, *, data: dict[str, object] | None = None) -> dict[str, object]:
+    if data is None:
+        data = _load_transaction_json(manifest)
     required_fields = {"id", "source", "original_path", "sha256", "size_bytes", "markdown", "phase", "source_mode"}
     if not isinstance(data, dict) or set(data) != required_fields or data.get("source_mode") != "move":
         raise ImportError(f"Malformed transaction journal: {manifest}")
@@ -478,6 +495,22 @@ def _check_integrity(path: Path, data: dict[str, object], *, missing_ok: bool = 
     return True
 
 
+def _source_matches(path: Path, size: int, digest: str) -> bool:
+    try:
+        return (not path.is_symlink() and path.is_file() and path.stat().st_size == size
+                and _sha256(path) == digest)
+    except OSError:
+        return False
+
+
+def _source_present(path: Path, size: int | None) -> bool:
+    try:
+        return (not path.is_symlink() and path.is_file()
+                and (size is None or path.stat().st_size == size))
+    except OSError:
+        return False
+
+
 def _restore_moved_staging_original(obj: Path, source: Path, data: dict[str, object]) -> None:
     """Restore a verified moved original to Incoming before discarding an unpublished stage."""
     target = _safe_relative(obj, data["original_path"], label="original")
@@ -535,7 +568,8 @@ def _cleanup_unjournaled_staging(vault: Path, obj: Path, incoming: Path, *, dry_
     return {"id": "unknown", "source": source_rel, "action": action}
 
 
-def _apply_transaction(vault: Path, obj: Path, manifest: Path, data: dict[str, object], *, dry_run: bool = False) -> str:
+def _apply_transaction(vault: Path, obj: Path, manifest: Path, data: dict[str, object], *,
+                       dry_run: bool = False) -> str:
     target = _safe_relative(obj, data["original_path"], label="original")
     _check_integrity(target, data)
     metadata_path = _safe_relative(obj, "metadata.json", label="metadata")
@@ -568,7 +602,8 @@ def _apply_transaction(vault: Path, obj: Path, manifest: Path, data: dict[str, o
 
 
 def recover_transactions(vault: str | Path, *, dry_run: bool = False,
-                         config: AppConfig | None = None) -> tuple[list[dict[str, object]], set[str]]:
+                         config: AppConfig | None = None,
+                         only_source: str | None = None) -> tuple[list[dict[str, object]], set[str]]:
     """Recover published imports or safely discard staging copies while source remains valid."""
     config = config or DEFAULT_CONFIG
     root = Path(vault).resolve()
@@ -592,6 +627,8 @@ def recover_transactions(vault: str | Path, *, dry_run: bool = False,
         if manifest.is_symlink():
             raise ImportError(f"Transaction journal is a symbolic link: {manifest}")
         if not manifest.exists():
+            if only_source is not None:
+                continue
             if obj.name.startswith(".incomplete-"):
                 recovery = _cleanup_unjournaled_staging(root, obj, incoming, dry_run=dry_run)
                 if (dry_run and isinstance(recovery.get("source"), str)
@@ -600,8 +637,23 @@ def recover_transactions(vault: str | Path, *, dry_run: bool = False,
                 completed.append(recovery)
                 continue
             continue
-        data = _read_transaction(manifest, root, obj, incoming_relative,
-                                 config.general.small_file_threshold_bytes)
+        if only_source is None:
+            data = _read_transaction(
+                manifest, root, obj, incoming_relative,
+                config.general.small_file_threshold_bytes,
+            )
+        else:
+            candidate = _load_transaction_json(manifest)
+            journal_source = candidate.get("source")
+            if not isinstance(journal_source, str):
+                raise ImportError(f"Malformed transaction journal: {manifest}")
+            if journal_source != only_source:
+                continue
+            data = _read_transaction(
+                manifest, root, obj, incoming_relative,
+                config.general.small_file_threshold_bytes,
+                data=candidate,
+            )
         source = _safe_relative(root, data["source"], label="source")
         if obj.name.startswith(".incomplete-"):
             target = _safe_relative(obj, data["original_path"], label="original")
@@ -628,7 +680,8 @@ def recover_transactions(vault: str | Path, *, dry_run: bool = False,
                 completed.append({"id": data["id"], "source": data["source"], "action": "apply pending Markdown edits and finalize transaction"})
                 continue
             identifier = _apply_transaction(root, obj, manifest, data)
-            completed.append({"id": identifier, "source": data["source"], "action": "recovered published transaction"})
+            completed.append({"id": identifier, "source": data["source"],
+                              "action": "recovered published transaction"})
     return completed, covered_sources
 
 
@@ -677,7 +730,8 @@ def _reject_pending_transactions_outside(vault: Path, objects: Path) -> None:
         directories[:] = retained
 
 
-def import_vault(vault: str | Path, *, dry_run: bool = False, config: AppConfig | None = None) -> list[dict[str, object]]:
+def import_vault(vault: str | Path, *, dry_run: bool = False,
+                 config: AppConfig | None = None) -> ImportBatchResult:
     """Import regular files from a vault's Incoming directory and rewrite notes."""
     root = Path(vault)
     if root.is_symlink() or not root.is_dir():
@@ -693,6 +747,7 @@ def import_vault(vault: str | Path, *, dry_run: bool = False, config: AppConfig 
     if incoming.is_symlink() or not incoming.is_dir():
         raise ImportError(f"Incoming directory is missing or unsafe: {incoming}")
     error_log_path = root.parent / "import.log"
+    batch = ImportBatchResult()
     try:
         recovery_rows, covered_sources = recover_transactions(root, dry_run=dry_run, config=config)
         _reject_pending_transactions_outside(root, objects)
@@ -702,19 +757,68 @@ def import_vault(vault: str | Path, *, dry_run: bool = False, config: AppConfig 
         raise
     files = sorted((p for p in incoming.rglob("*") if not p.is_symlink() and p.is_file()), key=lambda p: str(p).casefold())
     direct_files = [p for p in files if p.parent == incoming and p.relative_to(root).as_posix() not in covered_sources]
-    media_files = [p for p in direct_files if not p.name.startswith(".") and _media_kind(p.name) is not None]
-    for path in media_files:
+
+    def report_failure(source: Path, relative_path: str, digest: str | None, size: int | None,
+                       error: Exception, *, transaction_started: bool = False,
+                       already_published: bool = False) -> None:
+        reason = " ".join(str(error).split())
+        if dry_run:
+            batch.failures.append({"source": relative_path, "reason": reason, "serious": False})
+            return
+        serious = False
+        if already_published:
+            reason = f"Import object was published but transaction finalization failed: {reason}"
+            serious = True
+        else:
+            try:
+                if transaction_started:
+                    recover_transactions(root, config=config, only_source=relative_path)
+                restored = (_source_matches(source, size, digest)
+                            if digest is not None and size is not None
+                            else not transaction_started and _source_present(source, size))
+                if not restored:
+                    raise ImportError("original could not be verified at its Incoming path after rollback")
+            except Exception as recovery_error:
+                reason = f"Import failed: {reason}; serious recovery error: {recovery_error}"
+                serious = True
+        _append_import_error(error_log_path, source, ImportError(reason))
+        batch.failures.append({"source": relative_path, "reason": reason, "serious": serious})
+
+    media_files: list[Path] = []
+    file_integrity: dict[Path, tuple[int, str]] = {}
+    for path in direct_files:
+        filename = path.name
+        size: int | None = None
+        digest: str | None = None
+        if path.name.startswith("."):
+            batch.skipped.append({"source": path.relative_to(incoming).as_posix(), "reason": "hidden file"})
+            continue
+        if _media_kind(path.name) is None:
+            batch.skipped.append({"source": path.relative_to(incoming).as_posix(), "reason": "unsupported media extension"})
+            continue
+        source_rel = path.relative_to(root).as_posix()
+        try:
+            if size is None:
+                size = path.stat().st_size
+            if digest is None:
+                digest = _sha256(path)
+        except Exception as error:
+            report_failure(path, source_rel, None, size, error)
+            continue
+        file_integrity[path] = (size, digest)
         invalid = filename_problem(path.name)
         if invalid:
-            if not dry_run:
-                _append_import_error(error_log_path, path, ImportError(invalid))
-            raise ImportError(invalid)
+            report_failure(path, source_rel, digest, size, ImportError(invalid))
+            continue
+        media_files.append(path)
+
     candidate_names = [p.name for p in media_files]
     candidate_plans: dict[Path, dict[str, object]] = {}
     ambiguous_names: set[str] = set()
     for source in media_files:
+        size, digest = file_integrity[source]
+        source_rel = source.relative_to(root).as_posix()
         try:
-            size = source.stat().st_size
             identifier = str(uuid.uuid4())
             ambiguities: list[dict[str, object]] = []
             reference_plan = _markdown_plan(
@@ -728,28 +832,34 @@ def import_vault(vault: str | Path, *, dry_run: bool = False, config: AppConfig 
             candidate_plans[source] = {
                 "id": identifier,
                 "size": size,
+                "sha256": digest,
                 "changes": reference_plan,
                 "ambiguities": ambiguities,
             }
             for ambiguity in ambiguities:
                 ambiguous_names.update(ambiguity["candidates"])
         except Exception as error:
-            if not dry_run:
-                _append_import_error(error_log_path, source, error)
-            raise
+            report_failure(source, source_rel, digest, size, error)
+            continue
     referenced_files = [
         source for source in media_files
-        if candidate_plans[source]["changes"] or source.name in ambiguous_names
+        if source in candidate_plans
+        and (candidate_plans[source]["changes"] or source.name in ambiguous_names)
     ]
-    plan: list[dict[str, object]] = []
     if dry_run:
         for row in recovery_rows:
-            plan.append({**row, "target": "", "changes": {}})
+            batch.append({**row, "target": "", "changes": {}})
+    referenced_set = set(referenced_files)
+    for source in media_files:
+        if source not in referenced_set and source in candidate_plans:
+            batch.skipped.append({"source": source.relative_to(incoming).as_posix(), "reason": "no matching Markdown reference"})
     for source in referenced_files:
+        candidate = candidate_plans[source]
+        size, digest = file_integrity[source]
+        source_rel = source.relative_to(root).as_posix()
+        transaction_started = False
+        published = False
         try:
-            candidate = candidate_plans[source]
-            size = candidate["size"]
-            source_rel = source.relative_to(root).as_posix()
             if source_rel in covered_sources:
                 continue
             identifier = candidate["id"]
@@ -758,20 +868,23 @@ def import_vault(vault: str | Path, *, dry_run: bool = False, config: AppConfig 
                                       "target": f"{objects_relative}/{identifier}/{ 'originals' if size >= config.general.small_file_threshold_bytes else 'shared'}/{source.name}",
                                       "preview": ("preview.mp4" if _media_kind(source.name) == "video" else "preview.webp") if size >= config.general.small_file_threshold_bytes else None,
                                       "changes": edits, "ambiguities": candidate["ambiguities"], "recovery": False}
-            plan.append(row)
             if dry_run:
+                batch.append(row)
                 continue
-            # Move and verify the original, then generate previews and metadata.
             objects.mkdir(parents=True, exist_ok=True)
             manifest: dict[str, object] = {"source": source.relative_to(root).as_posix(),
                                           "markdown": edits,
-                                          "sha256": _sha256(source), "size_bytes": size}
+                                          "sha256": digest, "size_bytes": size}
+            transaction_started = True
             result = _import_file(source, objects, layout=True, identifier=uuid.UUID(identifier), transaction=manifest,
                                   config=config)
-            recover_transactions(root, config=config)
+            published = True
+            recover_transactions(root, config=config, only_source=source_rel)
             row["id"] = result.metadata.id
+            batch.append(row)
         except Exception as error:
-            if not dry_run:
-                _append_import_error(error_log_path, source, error)
-            raise
-    return plan
+            if dry_run:
+                raise
+            report_failure(source, source_rel, digest, size, error,
+                           transaction_started=transaction_started, already_published=published)
+    return batch

@@ -35,6 +35,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("usage: madObsidian", output.getvalue())
         self.assertIn("status", output.getvalue())
 
+    def test_obsolete_failed_imports_command_is_not_available(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exit_info:
+            main(["failed-imports", "list"])
+        self.assertEqual(exit_info.exception.code, 2)
+
     def test_import_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

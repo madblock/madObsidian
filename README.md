@@ -93,9 +93,21 @@ It records the source hash, moves the source into an unpublished staging object
 using `Path.rename()`, verifies the moved file, then generates previews and metadata.
 The source and destination must be on the same filesystem. If the rename fails,
 the import is aborted: the original remains in Incoming, no object is published,
-and Markdown is not modified. Failed imports are logged to `import.log` beside
-the vault directory. For compatibility, the two-argument form remains a copy-only
-legacy importer.
+and Markdown is not modified.
+
+Failed imports are logged to `import.log` beside the vault directory. In a
+vault batch, failures are isolated per file. The importer attempts safe
+transaction rollback and verifies that the original remains at its Incoming
+path. When restoration succeeds, the file remains eligible for a future import
+attempt; failures do not create exclusion rules or suppress retries. If rollback
+cannot be verified, the staging object and transaction journal are retained for
+recovery. A published object whose Markdown finalization is incomplete also
+remains journaled for recovery. Other eligible files continue importing after
+a failure. The import summary reports imported, skipped, and failed counts and
+identifies affected files. A batch with any failed file returns a nonzero CLI
+status, even when other files were imported. Recovery errors require successful
+transaction recovery before the affected file can be safely retried.
+For compatibility, the two-argument form remains a copy-only legacy importer.
 
 Vault objects use this layout (empty original directories are omitted):
 
@@ -163,10 +175,15 @@ Incoming
 !objects/*/shared
 !objects/*/shared/**
 objects/*/*
+objects/.incomplete-*
 ```
 
-Windows and Raspberry Pi synchronize all archive files. These rules are
-documentation only; madObsidian does not configure remote devices.
+Add `objects/.incomplete-*` to `.stignore` on every synchronized device,
+including the Raspberry Pi, so unpublished staging transactions are not
+synchronized. This rule affects synchronization only; it does not recover or
+clean up local transactions. Windows and Raspberry Pi otherwise synchronize all
+archive files. These rules are documentation only; madObsidian does not
+configure remote devices.
 
 Legacy imports are copied into a temporary directory under `objects`, verified by
 SHA-256, and accompanied by metadata before the directory is renamed to its
@@ -226,3 +243,10 @@ for investigation and are never indexed.
   improve recovery after sudden power loss.
 - Further harden and test Syncthing ingestion and synchronization rules to
   reduce the chance of accidental exclusion or unwanted propagation.
+- Design and implement plugin-owned pinning as a future original-object
+  retention policy in the cache manager.
+- Add recovery guidance and an operator workflow for persistent failures where
+  the journal or staged original cannot be verified automatically.
+- Perform a comprehensive code review of the entire test suite, including
+  coverage gaps, test isolation, edge cases, and consistency with documented
+  importer behavior.
