@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from madobsidian.cli import main
+from madobsidian.exclusions import exclusion_path, load_exclusions
 from madobsidian.importer import import_vault
 
 
@@ -110,6 +111,7 @@ class ImportFailureTests(unittest.TestCase):
         self.assertFalse(source.exists())
         stages = list((self.vault / "objects").glob(".incomplete-*"))
         self.assertEqual(len(stages), 1)
+        self.assertFalse((self.vault.parent / "exclusions.ini").exists())
         staged_original = stages[0] / "shared" / source.name
         self.assertEqual(hashlib.sha256(staged_original.read_bytes()).hexdigest(), digest)
         self.assertTrue((stages[0] / "transaction.json").is_file())
@@ -119,7 +121,7 @@ class ImportFailureTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), digest)
         self.assertFalse(list((self.vault / "objects").glob(".incomplete-*")))
 
-    def test_unchanged_failed_file_can_be_retried(self) -> None:
+    def test_unchanged_failed_file_is_ignored_until_exclusion_is_removed(self) -> None:
         source = self.add_file("same.jpg", b"failed content")
         first, second = self.previews_fail_for({source.name})
         with first, second:
@@ -127,15 +129,24 @@ class ImportFailureTests(unittest.TestCase):
 
         self.assertEqual(len(failed.failures), 1)
         self.assertTrue(source.is_file())
+        exclusions_file = exclusion_path(None, self.vault)
+        self.assertEqual(set(load_exclusions(exclusions_file).values()), {"same.jpg"})
 
+        with mock.patch("madobsidian.importer._sha256", side_effect=AssertionError("excluded file was hashed")), \
+                mock.patch("madobsidian.importer.generate_preview", side_effect=AssertionError("preview attempted")):
+            ignored = import_vault(self.vault)
+        self.assertEqual(ignored.ignored, [{"source": "same.jpg", "reason": "listed in exclusions.ini"}])
+        self.assertTrue(source.is_file())
+
+        exclusions_file.write_text("[ignore]\n", encoding="utf-8")
         with mock.patch("madobsidian.importer.generate_preview", return_value=None), mock.patch(
-            "madobsidian.importer.generate_video_preview", return_value=None
-        ):
+                "madobsidian.importer.generate_video_preview", return_value=None):
             retried = import_vault(self.vault)
 
         self.assertEqual(len(retried), 1)
         self.assertEqual(retried[0]["source"], "Incoming/same.jpg")
         self.assertFalse(source.exists())
+        self.assertFalse(load_exclusions(exclusions_file))
 
     def test_unsupported_file_remains_in_incoming(self) -> None:
         unsupported = self.add_file("notes.txt", b"not media")
@@ -151,8 +162,15 @@ class ImportFailureTests(unittest.TestCase):
         with one, two, contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             result = main(["import", str(self.vault)])
         self.assertEqual(result, 1)
-        self.assertIn("Imported 1 file(s); skipped 0; failed 1.", output.getvalue())
+        self.assertIn("Imported 1 file(s); skipped 0; ignored 0; failed 1.", output.getvalue())
         self.assertIn("Failed: Incoming/a-fail.jpg", errors.getvalue())
+
+        ignored_output = io.StringIO()
+        with contextlib.redirect_stdout(ignored_output):
+            ignored_result = main(["import", str(self.vault)])
+        self.assertEqual(ignored_result, 0)
+        self.assertIn("Imported 0 file(s); skipped 0; ignored 1; failed 0.", ignored_output.getvalue())
+        self.assertIn("Ignored: a-fail.jpg (listed in exclusions.ini)", ignored_output.getvalue())
 
     def test_cli_successful_batch_returns_zero(self) -> None:
         self.add_file("good.jpg")
@@ -162,7 +180,7 @@ class ImportFailureTests(unittest.TestCase):
         ), contextlib.redirect_stdout(output):
             result = main(["import", str(self.vault)])
         self.assertEqual(result, 0)
-        self.assertIn("Imported 1 file(s); skipped 0; failed 0.", output.getvalue())
+        self.assertIn("Imported 1 file(s); skipped 0; ignored 0; failed 0.", output.getvalue())
 
 
 if __name__ == "__main__":

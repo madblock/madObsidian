@@ -32,6 +32,9 @@ bframe-test.mp4
 
 # Machine-local processing configuration
 config.ini
+exclusions.ini
+exclusions.ini.lock
+.madobsidian-vault-*.lock
 
 # Local development data
 /archive-test/

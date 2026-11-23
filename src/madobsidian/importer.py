@@ -16,7 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from madobsidian.config import AppConfig, DEFAULT_CONFIG, resolve_vault_directory
+from madobsidian.exclusions import ExclusionsError, append_exclusion, exclusion_path, load_exclusions
 from madobsidian.filenames import filename_problem
+from madobsidian.locking import vault_import_lock
 from madobsidian.previews import REGISTERED_IMAGE_EXTENSIONS, generate_preview
 from madobsidian.video_previews import VIDEO_EXTENSIONS, generate_video_preview, is_video_candidate
 
@@ -45,6 +47,7 @@ class ImportBatchResult(list[dict[str, object]]):
     def __init__(self) -> None:
         super().__init__()
         self.skipped: list[dict[str, str]] = []
+        self.ignored: list[dict[str, str]] = []
         self.failures: list[dict[str, str | bool]] = []
 
 
@@ -732,6 +735,15 @@ def _reject_pending_transactions_outside(vault: Path, objects: Path) -> None:
 
 def import_vault(vault: str | Path, *, dry_run: bool = False,
                  config: AppConfig | None = None) -> ImportBatchResult:
+    root = Path(vault)
+    if root.is_symlink() or not root.is_dir():
+        raise ImportError(f"Vault must be a real directory: {root}")
+    with vault_import_lock(root.resolve()):
+        return _import_vault_locked(root, dry_run=dry_run, config=config)
+
+
+def _import_vault_locked(vault: str | Path, *, dry_run: bool = False,
+                         config: AppConfig | None = None) -> ImportBatchResult:
     """Import regular files from a vault's Incoming directory and rewrite notes."""
     root = Path(vault)
     if root.is_symlink() or not root.is_dir():
@@ -755,6 +767,14 @@ def import_vault(vault: str | Path, *, dry_run: bool = False,
         if not dry_run:
             _append_import_error(error_log_path, None, error)
         raise
+    exclusions_file = exclusion_path(config.config_path, root)
+    try:
+        exclusions = load_exclusions(exclusions_file)
+    except ExclusionsError as error:
+        if not dry_run:
+            _append_import_error(error_log_path, None, error)
+        raise ImportError(str(error)) from error
+    excluded_filenames = set(exclusions.values())
     files = sorted((p for p in incoming.rglob("*") if not p.is_symlink() and p.is_file()), key=lambda p: str(p).casefold())
     direct_files = [p for p in files if p.parent == incoming and p.relative_to(root).as_posix() not in covered_sources]
 
@@ -777,10 +797,18 @@ def import_vault(vault: str | Path, *, dry_run: bool = False,
                             if digest is not None and size is not None
                             else not transaction_started and _source_present(source, size))
                 if not restored:
-                    raise ImportError("original could not be verified at its Incoming path after rollback")
+                    raise ImportError("original integrity could not be verified at its Incoming path")
             except Exception as recovery_error:
                 reason = f"Import failed: {reason}; serious recovery error: {recovery_error}"
                 serious = True
+            else:
+                try:
+                    append_exclusion(exclusions_file, source.name)
+                except ExclusionsError as exclusion_error:
+                    reason = (
+                        f"Import failed; original was restored and verified, but exclusions.ini update failed: "
+                        f"{exclusion_error}"
+                    )
         _append_import_error(error_log_path, source, ImportError(reason))
         batch.failures.append({"source": relative_path, "reason": reason, "serious": serious})
 
@@ -788,6 +816,12 @@ def import_vault(vault: str | Path, *, dry_run: bool = False,
     file_integrity: dict[Path, tuple[int, str]] = {}
     for path in direct_files:
         filename = path.name
+        if filename in excluded_filenames:
+            batch.ignored.append({
+                "source": path.relative_to(incoming).as_posix(),
+                "reason": "listed in exclusions.ini",
+            })
+            continue
         size: int | None = None
         digest: str | None = None
         if path.name.startswith("."):

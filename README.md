@@ -97,17 +97,50 @@ and Markdown is not modified.
 
 Failed imports are logged to `import.log` beside the vault directory. In a
 vault batch, failures are isolated per file. The importer attempts safe
-transaction rollback and verifies that the original remains at its Incoming
-path. When restoration succeeds, the file remains eligible for a future import
-attempt; failures do not create exclusion rules or suppress retries. If rollback
-cannot be verified, the staging object and transaction journal are retained for
-recovery. A published object whose Markdown finalization is incomplete also
-remains journaled for recovery. Other eligible files continue importing after
-a failure. The import summary reports imported, skipped, and failed counts and
-identifies affected files. A batch with any failed file returns a nonzero CLI
-status, even when other files were imported. Recovery errors require successful
-transaction recovery before the affected file can be safely retried.
+transaction rollback and verifies that the original's size and SHA-256 match at
+its original Incoming path. After that verification, it records the filename in
+`exclusions.ini` so the same file is ignored on subsequent runs. If rollback or
+integrity verification fails, the staging object and transaction journal are
+retained for recovery and no exclusion is written. A published object whose
+Markdown finalization is incomplete also remains journaled for recovery and is
+never excluded. Other eligible files continue importing after a failure.
+Remove the filename's line from `exclusions.ini` manually to re-enable retry.
+The import summary reports imported, skipped, ignored, and failed counts;
+ignored files are listed separately from ordinary eligibility skips. A batch
+with any failed file returns a nonzero CLI status, even when other files were
+imported. Recovery errors require successful transaction recovery before the
+affected file can be safely retried.
 For compatibility, the two-argument form remains a copy-only legacy importer.
+
+### Persistent failed-import exclusions
+
+`exclusions.ini` is stored beside the selected `config.ini`. When no `--config`
+is supplied, it is stored in the vault's parent directory. The file uses a
+separate `[ignore]` section with a SHA-256 key derived from the exact UTF-8
+filename and a JSON-encoded filename value:
+
+```ini
+[ignore]
+ed2e575a1d298e08df19dca9733da3f46eab5b157b1b8f9ed02f31b2f907ec79 = "example.jpg"
+```
+
+The importer validates each key against its JSON filename and fails safely if
+the file is malformed. It loads exclusions after transaction recovery, then
+skips matching filenames before reading their contents, generating previews,
+planning Markdown edits, or attempting import. These are shown as ignored, not
+as ordinary skips such as hidden, unsupported, or unreferenced files. Exclusions
+are append-only from the importer's perspective; manually remove a line to
+permit another attempt. The importer never excludes a source if rollback is
+incomplete, its original cannot be verified, or its object was already
+published. Exclusion updates reload under a cross-process lock and use an
+atomic replacement so concurrent updates do not lose entries.
+
+Vault imports are serialized by a cross-process lock whose name includes the
+SHA-256 hash of the resolved vault path. The persistent lock file is placed in
+`root.parent`, outside the synchronized vault, and is not removed after release.
+Acquiring it may create this small coordination file. Dry-run may create that
+lock file, but does not modify the vault, selected configuration file, or
+`exclusions.ini`.
 
 Vault objects use this layout (empty original directories are omitted):
 
@@ -227,8 +260,6 @@ for investigation and are never indexed.
 
 ## TODO
 
-- Add per-vault importer locking to prevent concurrent processes from racing on
-  the same source files or notes.
 - Strengthen transaction-journal semantic validation and further constrain
   recovery filesystem changes to reduce the impact of malformed local state.
 - Expand Markdown context handling for frontmatter and inline-code edge cases,

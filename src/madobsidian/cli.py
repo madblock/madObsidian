@@ -53,7 +53,8 @@ def main(argv: list[str] | None = None) -> int:
                 rows = import_vault(args.source, dry_run=args.dry_run, config=config)
                 print(
                     f"{'Would import' if args.dry_run else 'Imported'} {len(rows)} file(s); "
-                    f"skipped {len(rows.skipped)}; failed {len(rows.failures)}."
+                    f"skipped {len(rows.skipped)}; ignored {len(rows.ignored)}; "
+                    f"failed {len(rows.failures)}."
                 )
                 for row in rows:
                     target_text = f" -> {row['target']}" if row.get("target") else ""
@@ -74,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
                             print("".join(difflib.unified_diff(old_text, new_text, fromfile=note, tofile=note + " (proposed)")), end="")
                 for skipped in rows.skipped:
                     print(f"Skipped: {skipped['source']} ({skipped['reason']})")
+                for ignored in rows.ignored:
+                    print(f"Ignored: {ignored['source']} ({ignored['reason']})")
                 for failure in rows.failures:
                     severity = "recovery error" if failure["serious"] else "failed"
                     print(f"{severity.title()}: {failure['source']} ({failure['reason']})", file=sys.stderr)
