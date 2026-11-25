@@ -1,25 +1,60 @@
 # Project Progress and Current State
 
-**Current version:** `0.2.2` (prepared release candidate on branch `master`; not yet committed or tagged).
-**Last audited:** 2026-11-25 (definitive single full-suite run on Windows, Python `3.11.6`, `PYTHONPATH=src`, with `MADOBSIDIAN_FFMPEG` and `MADOBSIDIAN_FFPROBE` configured: **171/171 passed** in `235.108s`).
+The stable Phase 1 baseline is `0f9d25b` (`0.2.2`). Phase 2 development and its verification record belong to `develop`.
 
-This document tracks what is implemented, what is verified by tests, known bugs and discrepancies, technical debt, deferred work, and open questions.
+## Phase 2 verification
 
----
+| Work | Exercised behavior |
+| --- | --- |
+| Transaction journal | Separate preparation, publication, completion and rollback phases. Verify media and preview integrity, validate targeted edits, retain conflicting evidence and write a verified rollback exclusion before journal removal. |
+| Local coordination | Import, standalone recovery, verify and rebuild share a persistent per-vault lock. Separate Windows processes waited for the lock. |
+| Incoming and exclusions | Obsidian setting precedence, absolute in-vault paths, malformed configuration, missing-directory logging, nested exclusions, manual retry, atomic competing writes, shared replica visibility and both NFC candidates retained. |
+| Archive health | Unknown entries, pending transactions, transfer artifacts, malformed metadata, missing indexed objects, simulated memory exhaustion and configured scan limits preserve the previous index. |
+| Portability and links | The staging move chooses the portable leaf. Explicit links recover through publication, including when the leaf differs from the original. The lexer covers wiki and inline Markdown forms, aliases, relative targets, code spans, fences, comments and frontmatter. |
+| Status | Read-only diagnostics report local paths, tools, index readability, bounded journal count and exclusions. |
+| Video | Real Windows encode, probe, decode and timeline checks used the source stream's numeric time base. Raspberry Pi FFmpeg 5.1.9 awaits manual validation after integration. |
+| Syncthing | Two isolated Syncthing 2.1.7 processes on loopback synchronized a published journal after importer termination. Recovery on the second peer returned the corrected note and finalized object to the first. A mid-transfer stop left the receiver incomplete. Reconnection restored identical media bytes. Divergent offline exclusions produced a preserved conflict copy. |
 
-## Phase 2 transaction checkpoint
+### Process termination coverage
 
-The subprocess crash suite covers source verification, stage and layout creation, temporary and replaced journals, source move, preview completion, metadata write, directory publication, Markdown replacement, finalization and journal removal. Rollback cases interrupt source restoration, staged-original unlink, cleanup and journal removal. Each case checks the surviving media and repeats recovery in a fresh process. The import does not write the disposable index. Physical power loss and Raspberry Pi durability remain unverified.
+The matrix in `tests/test_transaction_crashes.py` uses `os._exit(83)`. It covers 36 scenarios, including repeated boundaries for portable names. Each case inspects media, notes or the index and runs recovery in fresh processes.
 
-## 1. Implemented Functionality
+- 12 before publication cover input hash verification, stage creation, layout creation, journal temporary writes and replacements for moving, moved and prepared phases, source rename, preview completion and metadata write.
+- 8 after publication cover directory rename, published and completed journals before and after replacement, Markdown temporary write and note replacement, and journal removal.
+- 11 during rollback cover both rollback journal writes before and after replacement, verified source restoration, staged-original removal, exclusive-copy destination creation and verified copy completion, exclusion persistence, payload cleanup and journal deletion. Interruption with a partial restored file leaves the verified stage and journal available on both recovery attempts.
+- 3 repeat source move, publication and partial note rewriting with a portable rename. Two index tests terminate immediately before and after atomic index replacement, then run recovery and rebuild twice.
+
+These tests model abrupt process exit. Physical power failure, POSIX filesystem durability, physical multi-device networking and the actual Raspberry Pi remain outside the Windows verification record. A clean local scan cannot assert global Syncthing convergence. Independent writers must wait for synchronization before switching devices.
+
+### Windows verification environment and commands
+
+The final verbose run discovered 171 tests and finished in 321.488 seconds. It passed 170 with zero failures or errors. The single skip requires filenames that Windows cannot create. The branch-wide Git whitespace check passed. Python AST parsing covered all 28 source and test modules, and the documentation check resolved 31 local links across eight engineering documents.
+
+Windows, Python 3.11.6, Pillow 13.0.0, FFmpeg and ffprobe from build `N-128915-g3d16b774d7-20261115`, and Syncthing 2.1.7. The project has no configured standalone type checker or linter. The checkout uses the existing virtual environment with the source tree on `PYTHONPATH`.
+
+```powershell
+$env:PYTHONPATH = 'src'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:MADOBSIDIAN_FFMPEG = (Resolve-Path ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe).Path
+$env:MADOBSIDIAN_FFPROBE = (Resolve-Path ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe).Path
+$env:MADOBSIDIAN_TEST_SYNCTHING = 'C:\Programs\Syncthing\syncthing.exe'
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+git diff --check 0f9d25b..develop
+```
+
+Focused runs used `-m unittest discover -s tests -p <module>.py`. The archive, vault import, exclusions and process-lock modules passed 31, 45, 16 and 3 tests respectively. The crash module passed all four methods, including the 36 subprocess scenarios above. The standalone Syncthing transfer/reconnect test passed with real peers. The portability and diagnostics module passed six tests on Windows and skipped its POSIX-only filesystem case. Some tests inject exceptions, cap scan limits, substitute preview generation, or force the rollback hard-link fallback. Real FFmpeg integration covers CFR, VFR, delayed audio, rotation and threshold behavior.
+
+The removed copy API had 19 dedicated tests in the baseline importer module. Its replacement tests exercise vault metadata, link isolation and UUID collisions. Existing image and video integration fixtures now submit referenced media to the vault importer. Counts across versions therefore represent different test inventories.
+
+## 1. Phase 1 baseline inventory (historical)
 
 | Capability | Status | Primary Modules | Verification / Tests |
 | --- | --- | --- | --- |
 | Vault move-only importer (`import_vault`, `--dry-run` with `batch.recoveries`) | Implemented (`0.2.2` dry-run separation) | `importer.py`, `cli.py` | `tests/test_vault_import.py` |
-| Legacy copy-only importer (`import_path`) | Implemented | `importer.py`, `cli.py` | `tests/test_importer.py` |
+| Legacy copy-only importer (removed in Phase 2) | Implemented | `importer.py`, `cli.py` | `tests/test_importer.py` |
 | Transactional journaling (`transaction.json`) & crash recovery | Implemented | `importer.py` | `tests/test_vault_import.py`, `tests/test_import_failures.py` |
 | Per-file failure isolation, rollback & JSONL `import.log` | Implemented | `importer.py` | `tests/test_import_failures.py`, `tests/test_vault_import.py` |
-| Persistent failed-import exclusions (`exclusions.ini` `[ignore]`) | Implemented (`0.2.1`) | `exclusions.py`, `importer.py`, `cli.py` | `tests/test_exclusions.py`, `tests/test_import_failures.py` |
+| Persistent failed-import exclusions (the Phase 1 exclusions file `[ignore]`) | Implemented (`0.2.1`) | `exclusions.py`, `importer.py`, `cli.py` | `tests/test_exclusions.py`, `tests/test_import_failures.py` |
 | Cross-platform per-vault & exclusions file locking | Implemented (`0.2.1`) | `locking.py`, `importer.py`, `exclusions.py` | `tests/test_import_locking.py`, `tests/test_exclusions.py` |
 | Obsidian wikilink/embed rewriting + `madobsidian://<UUID>` link generation | Implemented *(URI opening plugin/handler deferred)* | `importer.py` | `tests/test_vault_import.py` |
 | Strict INI configuration (`config.ini` + `config.example.ini`, `[tools]`, conditional font validation) | Implemented (`0.2.2`) | `config.py`, `video_previews.py`, `archive.py`, `cli.py` | `tests/test_config.py` |
@@ -31,14 +66,14 @@ The subprocess crash suite covers source verification, stage and layout creation
 
 ---
 
-## 2. Test Suite Inventory
+## 2. Phase 1 test inventory (historical)
 
 The repository uses Python's standard `unittest` framework across **12 test modules** in `tests/`:
 
 - `tests/test_archive.py` — Archive scanning, metadata/symlink/preview validation, `rebuild-index` atomicity.
 - `tests/test_cli.py` — `--version`, `status`, `--help`, absence of obsolete `failed-imports`, legacy import & `--dry-run` rejection.
 - `tests/test_config.py` — INI loading, validation, defaults, relative fonts, conditional font validation (`watermark.enabled = false`), `[tools]` executable resolution precedence/lazy `auto`/CLI integration, CLI `--config` forwarding.
-- `tests/test_exclusions.py` — `exclusions.ini` format, validation, atomic/concurrent updates, pre-hashing & pre-transaction failure exclusions, dry-run isolation.
+- `tests/test_exclusions.py` — the Phase 1 exclusions file format, validation, atomic/concurrent updates, pre-hashing & pre-transaction failure exclusions, dry-run isolation.
 - `tests/test_import_failures.py` — Per-file rollback, continuation, exclusions after failure, CLI exit codes & ignored output.
 - `tests/test_import_locking.py` — Lock path stability and multi-process vault import serialization.
 - `tests/test_importer.py` — Legacy copy-only importer, UUID collisions, symlinks, reserved filenames, partial batch behavior.
@@ -63,7 +98,7 @@ The repository uses Python's standard `unittest` framework across **12 test modu
 
 ---
 
-## 3. Known Bugs, Discrepancies, and Immediate Issues
+## 3. Issues at the Phase 1 baseline (historical)
 
 1. **Raspberry Pi FFmpeg 5.1.9 `-enc_time_base:v filter` compatibility:** Separately tracked Linux/Pi compatibility issue; intentionally untouched in `0.2.2` and remains unverified on Raspberry Pi/Linux.
 2. **NFC-equivalent basename ambiguity moves files while leaving basename-only links unchanged (`src/madobsidian/importer.py:878-882`):**
@@ -77,7 +112,7 @@ The repository uses Python's standard `unittest` framework across **12 test modu
 
 ---
 
-## 4. Technical Debt and Hardening Backlog
+## 4. Phase 1 hardening backlog (historical)
 
 Captured from codebase inspection and the previous `README.md` TODO list:
 
@@ -88,8 +123,8 @@ Captured from codebase inspection and the previous `README.md` TODO list:
 - **Cross-platform filename portability (`filenames.py`):** Currently blocks separators, `.`/`..`, Windows drive letters, and `metadata.json`, but does not yet handle Windows-invalid characters (`< > : " | ? *`), trailing dots/spaces, or Windows reserved device names (`CON`, `NUL`, `PRN`, etc.). Similarly, `exclusions.py:67` uses `Path(filename).name != filename`, which does not reject backslashes on Linux.
 - **Unexpected non-UUID entries in `objects/` (`archive.py:314-317`):** Silently skipped by `scan_archive` instead of being reported as archive problems.
 - **Decompression bomb / resource-exhaustion protection (`archive.py`, `previews.py`):** Pillow image decoding and verification do not enforce explicit pixel/memory ceilings beyond Pillow defaults.
-- **Directory-level `fsync`:** File-level `os.fsync` is implemented for `metadata.json`, `transaction.json`, `index.json`, `exclusions.ini`, and `_atomic_text`, but parent directory `fsync` after renames is not yet implemented on POSIX.
-- **Locking gaps outside `import_vault`:** `verify`, `rebuild-index`, and legacy `import_path` do not acquire `vault_import_lock`; running `verify` concurrently with `import_vault` can report transient `.incomplete-*` stages as problems.
+- **Directory-level `fsync`:** File-level `os.fsync` is implemented for `metadata.json`, `transaction.json`, `index.json`, the Phase 1 exclusions file, and `_atomic_text`, but parent directory `fsync` after renames is not yet implemented on POSIX.
+- **Locking gaps outside `import_vault`:** `verify`, `rebuild-index`, and the old copy importer do not acquire `vault_import_lock`; running `verify` concurrently with `import_vault` can report transient `.incomplete-*` stages as problems.
 - **Syncthing rules verification:** End-to-end testing and hardening of `.stignore` behavior across devices.
 - **Operator recovery workflow:** Clear operator documentation/tooling for persistent unrecoverable failures where neither `Incoming/` nor staging verifies automatically.
 - **Comprehensive test-suite review:** Audit test isolation, coverage gaps, and consistency with documented behavior across all 12 test modules.
@@ -103,7 +138,4 @@ Captured from codebase inspection and the previous `README.md` TODO list:
 - **Plugin-owned pinning (`[pin]` semantics / cache manager):** Original-object retention policy on lightweight devices.
 - **Obsidian plugin / registered `madobsidian://<UUID>` URI handler:** Generating `madobsidian://<UUID>` links in Markdown is already implemented; an Obsidian plugin or OS/app URI handler that opens and resolves those links is deferred.
 
-### Unresolved Design Questions
-
-1. **Shared `exclusions.ini` across multiple vaults:** When multiple vaults pass the same `--config`, `exclusions.ini` is shared beside `config.ini`, so an ignored basename in Vault A is also ignored in Vault B. Is per-config sharing intentional, or should exclusions be vault-scoped?
-2. **Future of `madObsidian status` and legacy `import_path`:** Should `status` inspect a vault/config (reporting pending transactions, ignored count, lock state), or remain minimal? Is legacy two-path `import_path` permanently supported or slated for deprecation?
+Phase 2 resolves the former exclusion scope and status questions. Multi-vault orchestration remains deferred.
