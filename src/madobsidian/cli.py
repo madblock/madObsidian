@@ -51,11 +51,21 @@ def main(argv: list[str] | None = None) -> int:
             config = load_config(args.config)
             if args.archive is None:
                 rows = import_vault(args.source, dry_run=args.dry_run, config=config)
-                print(
-                    f"{'Would import' if args.dry_run else 'Imported'} {len(rows)} file(s); "
-                    f"skipped {len(rows.skipped)}; ignored {len(rows.ignored)}; "
-                    f"failed {len(rows.failures)}."
-                )
+                if args.dry_run:
+                    print(
+                        f"Would import {len(rows)} file(s); "
+                        f"pending recoveries {len(rows.recoveries)}; "
+                        f"skipped {len(rows.skipped)}; ignored {len(rows.ignored)}; "
+                        f"failed {len(rows.failures)}."
+                    )
+                else:
+                    print(
+                        f"Imported {len(rows)} file(s); "
+                        f"skipped {len(rows.skipped)}; ignored {len(rows.ignored)}; "
+                        f"failed {len(rows.failures)}."
+                    )
+                for recovery in rows.recoveries:
+                    print(f"Pending recovery: {recovery['id']}  {recovery['source']} ({recovery['action']})")
                 for row in rows:
                     target_text = f" -> {row['target']}" if row.get("target") else ""
                     print(f"{row['id']}  {row['source']}{target_text}")
@@ -95,7 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             config = load_config(args.config)
             options = {"objects_directory": config.general.objects_directory,
-                       "small_file_threshold_bytes": config.general.small_file_threshold_bytes}
+                       "small_file_threshold_bytes": config.general.small_file_threshold_bytes,
+                       "tools": config.tools}
             report = scan_archive(args.archive, **options) if args.command == "verify" else rebuild_index(args.archive, **options)
         except (ConfigError, ArchiveError, OSError) as error:
             print(f"Archive operation failed: {error}", file=sys.stderr)

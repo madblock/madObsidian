@@ -6,6 +6,22 @@ History prior to the creation of this changelog is reconstructed strictly from G
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-25
+
+*Prepared release candidate on `master` (not yet committed or tagged; annotated `v0.2.2` tag planned on final release commit).*
+
+### Added
+
+- Optional `[tools]` configuration section (`ffmpeg = auto`, `ffprobe = auto`) in `src/madobsidian/config.py` and `config.example.ini`, with independent per-executable precedence (`MADOBSIDIAN_FFMPEG` / `MADOBSIDIAN_FFPROBE` → explicit `[tools]` value → `PATH`), lazy `auto` `PATH` discovery, fail-closed explicit validation (relative paths resolved from `config_path.parent`, absolute paths, bare names via `shutil.which()`, POSIX `os.X_OK` check) without silent fallback, wired consistently across `import`, `verify`, and `rebuild-index`.
+- Dedicated `ImportBatchResult.recoveries` attribute separating pending recovery operations from planned dry-run imports (`len(batch)` excludes recoveries), with separate CLI dry-run summary counts (`pending recoveries N`) and `Pending recovery:` output lines.
+- End-to-end regression test in `tests/test_exclusions.py` covering pre-hashing `_sha256` `OSError` preservation, unchanged Markdown, non-serious failure reporting, `[ignore]` persistence, no published object, and skip-before-hash on rerun.
+- Comprehensive unit tests in `tests/test_config.py` and `tests/test_vault_import.py` covering `[tools]` precedence/validation/CLI integration, `watermark.enabled = false` font-validation skipping, and `batch.recoveries` dry-run vs. real-import semantics.
+
+### Changed
+
+- Skipped custom font existence and Pillow loading checks in `load_config()` when `[watermark] enabled = false`, while preserving strict validation when watermarking is enabled.
+- Updated package and CLI version strings to `0.2.2` across `pyproject.toml`, `src/madobsidian/__init__.py`, and `tests/test_cli.py`.
+
 ### Fixed
 
 - Fixed stale `return_value=[]` mock in `tests/test_config.py::ConfigTests::test_vault_cli_config_option_is_forwarded` to return `ImportBatchResult()`, restoring full 12-module test suite execution.
@@ -13,7 +29,7 @@ History prior to the creation of this changelog is reconstructed strictly from G
 ### Documentation
 
 - Established durable engineering documentation in `docs/` (`SPECIFICATION.md`, `DECISIONS.md`, `PROGRESS.md`, `ACCEPTANCE_CRITERIA.md`, `IMPLEMENTATION_PLAN.md`) and added `CHANGELOG.md`.
-- Streamlined `README.md` as the project entry point with links to the engineering documentation.
+- Streamlined `README.md` as the project entry point with links to the engineering documentation and updated `AGENTS.md` with automatic documentation-synchronization rules.
 
 ## [0.2.1] - 2026-11-23
 

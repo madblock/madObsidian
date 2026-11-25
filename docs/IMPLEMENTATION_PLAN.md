@@ -56,45 +56,20 @@ Each roadmap item is classified to distinguish urgency and maturity:
 - **`[Hardening]`** — Reliability, safety, portability, process, or test-coverage improvement over working behavior.
 - **`[Design proposal]`** — New capability or scope change whose design must be explicitly approved before implementation.
 
-### Phase 1: Immediate Stabilization & Hygiene (`0.2.2` candidates)
+### Phase 1: Immediate Stabilization & Hygiene (`0.2.2` — Implemented, Pending Release Commit & `v0.2.2` Tag)
 
-High-value, low-risk workstreams addressing concrete issues and improvements identified during the `0.2.1` audit:
+All five Phase 1 workstreams have been implemented and verified in the working tree for `0.2.2` (Git commit, push, and annotated `v0.2.2` tag remain pending explicit user authorization):
 
-1. **`[Hardening]` Add regression test for pre-hashing read failure exclusions (`tests/test_exclusions.py`)**
-   - Cover the complete behavior when an `OSError` occurs during `_sha256` before transaction start: source preservation in `Incoming/`, unchanged Markdown notes, non-serious failure (`serious = False`), persistent exclusion written to `exclusions.ini` (`[ignore]`), and subsequent import run skipping the file without hashing.
-2. **`[Required correction]` Clarify `--dry-run` result structure and output for new imports vs. pending recovery (`importer.py:883-885`, `cli.py:55`)**
-   - Preferred API design (not merely a CLI formatting workaround): add a dedicated `batch.recoveries` attribute on `ImportBatchResult` so that:
-     - The list contents represent planned imports in `--dry-run` mode and completed imports in a real run (`len(batch)` must not include recovery operations).
-     - `batch.recoveries` holds pending recovery operations.
-     - Existing `batch.skipped`, `batch.ignored`, and `batch.failures` remain separate categories.
-     - The CLI reports planned imports and pending recoveries separately.
-   - Planned acceptance criteria include updating affected dry-run tests and adding focused tests covering `--dry-run` output with pending recovery transactions.
-3. **`[Design proposal]` Add configurable `ffmpeg` and `ffprobe` executable paths in `config.ini` (`config.py`, `video_previews.py`, `archive.py`, `cli.py`, `config.example.ini`)**
-   - Add an optional dedicated `[tools]` section (portable defaults in `config.example.ini`):
-     ```ini
-     [tools]
-     ffmpeg = auto
-     ffprobe = auto
-     ```
-   - Enforce independent per-executable resolution precedence:
-     1. Corresponding environment variable (`MADOBSIDIAN_FFMPEG` / `MADOBSIDIAN_FFPROBE`).
-     2. Explicit value in `[tools]`.
-     3. Automatic discovery through `PATH`.
-   - `auto` means automatic `PATH` discovery and must be **lazy**: `load_config()` must not fail merely because FFmpeg or ffprobe is unavailable; an error is appropriate only when the executable is actually needed.
-   - Explicit configuration must be validated and fail clearly if invalid, with no silent fallback to another source:
-     - Relative paths containing path components resolve relative to `config_path.parent` (matching `[watermark] font`).
-     - Absolute paths are supported.
-     - Bare executable names without path components (for example, `my-ffmpeg`) resolve via `shutil.which()`, reporting an explicit configuration error if not found.
-   - Apply the same resolution logic consistently across `import`, `verify`, and `rebuild-index` wherever FFmpeg/ffprobe is invoked.
-   - Include unit tests covering precedence, lazy `auto` behavior, bare executable names, relative and absolute paths, invalid explicit paths, and missing executables.
-4. **`[Required correction]` Skip custom font validation when `watermark.enabled = false` (`config.py:172-183`)**
-   - When `watermark.enabled = false`, a configured custom font does not need to exist or load.
-   - Retain strict existence and Pillow load validation when watermarking is enabled.
-   - Add unit tests covering both enabled and disabled states.
-5. **`[Hardening]` Standardize release hygiene & Git tagging**
-   - A release may consist of multiple commits; do not require a single-commit release.
-   - Require version parity across `pyproject.toml`, `src/madobsidian/__init__.py`, and `tests/test_cli.py`, full 12-module test-suite verification, `CHANGELOG.md` update, `git diff --check`, and an annotated `vX.Y.Z` tag pointing to the final release commit.
-   - Begin consistent tagging with `v0.2.2`; do not retroactively tag `0.2.1`.
+1. `[x]` **`[Hardening]` Add regression test for pre-hashing read failure exclusions (`tests/test_exclusions.py`)**
+   - Covered complete behavior for `_sha256` `OSError` before transaction start: source preservation in `Incoming/`, unchanged Markdown, non-serious failure (`serious = False`), `[ignore]` persistence, no published object, and skip-before-hash on rerun.
+2. `[x]` **`[Required correction]` Clarify `--dry-run` result structure and output for new imports vs. pending recovery (`importer.py`, `cli.py`, `tests/test_vault_import.py`)**
+   - Added dedicated `ImportBatchResult.recoveries` attribute so `len(batch)` counts planned/completed imports only while `batch.recoveries` holds pending dry-run recovery operations and CLI reports them separately; updated existing dry-run tests and added coverage for dry-run with/without pending recoveries and real-import parity.
+3. `[x]` **`[Design proposal]` Add configurable `ffmpeg` and `ffprobe` executable paths in `config.ini` (`config.py`, `video_previews.py`, `archive.py`, `cli.py`, `config.example.ini`, `tests/test_config.py`)**
+   - Implemented optional `[tools]` section (`ffmpeg = auto`, `ffprobe = auto`) with independent precedence (`MADOBSIDIAN_FFMPEG`/`MADOBSIDIAN_FFPROBE` → `[tools]` → `PATH`), lazy `auto` `PATH` discovery, fail-closed explicit validation (relative to `config_path.parent`, absolute paths, `shutil.which()` for bare names, POSIX `os.X_OK` check) with no fallback, consistent integration across `import`, `verify`, and `rebuild-index`, and full unit tests.
+4. `[x]` **`[Required correction]` Skip custom font validation when `watermark.enabled = false` (`config.py`, `tests/test_config.py`)**
+   - Skipped custom font existence/Pillow loading when watermarking is disabled while retaining strict validation when enabled; added tests for both states.
+5. `[x]` **`[Hardening]` Standardize release hygiene & Git tagging (`pyproject.toml`, `src/madobsidian/__init__.py`, `tests/test_cli.py`, `CHANGELOG.md`, `docs/`)**
+   - Synchronized version `0.2.2`, updated `CHANGELOG.md` and engineering docs, verified full suite and `git diff --check`; ready for final release commit(s) and annotated `v0.2.2` tag once explicitly authorized (no retroactive tag for `0.2.1`).
 
 ### Phase 2: Robustness & Cross-Platform Hardening (`0.3.x` candidates)
 

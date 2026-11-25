@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import configparser
 import os
+import shutil
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from PIL import ImageFont
 
 
 _BUNDLED_FONT = Path(__file__).parent / "assets" / "DejaVuSans.ttf"
-_SECTIONS = {"general", "images", "videos", "watermark"}
+_SECTIONS = {"general", "images", "videos", "watermark", "tools"}
 _OPTIONS = {
     "general": {"incoming_directory", "objects_directory", "small_file_threshold_bytes"},
     "images": {"max_dimension", "format", "quality", "method"},
     "videos": {"max_dimension", "format", "video_codec", "video_crf", "preset", "audio_codec"},
     "watermark": {"enabled", "font", "font_size", "opacity", "position", "margin"},
+    "tools": {"ffmpeg", "ffprobe"},
 }
 
 
@@ -61,15 +63,75 @@ class WatermarkConfig:
 
 
 @dataclass(frozen=True)
+class ToolsConfig:
+    ffmpeg: str = "auto"
+    ffprobe: str = "auto"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     general: GeneralConfig = GeneralConfig()
     images: ImageConfig = ImageConfig()
     videos: VideoConfig = VideoConfig()
     watermark: WatermarkConfig = WatermarkConfig()
     config_path: Path | None = None
+    tools: ToolsConfig = ToolsConfig()
 
 
 DEFAULT_CONFIG = AppConfig()
+
+
+def _has_path_components(value: str) -> bool:
+    return (
+        "/" in value
+        or "\\" in value
+        or value in {".", ".."}
+        or value.startswith("~")
+        or Path(value).is_absolute()
+        or bool(PureWindowsPath(value).drive)
+    )
+
+
+def _is_posix() -> bool:
+    return os.name != "nt"
+
+
+def resolve_explicit_executable(value: str, *, base_dir: Path | None = None) -> str:
+    """Resolve and validate an explicit executable path or bare executable name.
+
+    Does not silently fall back across resolution strategies:
+    - Values with path components resolve as filesystem paths (relative paths
+      against ``base_dir`` when supplied, otherwise the current working directory).
+    - Bare executable names without path components resolve strictly via
+      ``shutil.which()``.
+    """
+    cleaned = value.strip()
+    if not cleaned or "\0" in cleaned:
+        raise ValueError("executable value must be non-empty")
+    if _has_path_components(cleaned):
+        candidate = Path(cleaned).expanduser()
+        if not candidate.is_absolute():
+            candidate = (base_dir / candidate) if base_dir is not None else candidate
+        candidate = candidate.resolve()
+        if not _is_posix():
+            if candidate.is_file():
+                return str(candidate)
+            located = shutil.which(str(candidate))
+            if located and Path(located).is_file():
+                return str(Path(located).resolve())
+            raise ValueError(f"executable file does not exist: {candidate}")
+        if not candidate.is_file():
+            raise ValueError(f"executable file does not exist: {candidate}")
+        if not os.access(candidate, os.X_OK):
+            raise ValueError(f"file is not executable: {candidate}")
+        return str(candidate)
+    located = shutil.which(cleaned)
+    if not located:
+        raise ValueError(f"executable {cleaned!r} was not found on PATH")
+    located_path = Path(located)
+    if not located_path.is_file() or (_is_posix() and not os.access(located_path, os.X_OK)):
+        raise ValueError(f"resolved path for {cleaned!r} is not an executable file: {located}")
+    return located
 
 
 def _error(path: Path, section: str, key: str, message: str) -> ConfigError:
@@ -166,6 +228,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         }),
         audio_codec=_choice(parser, config_path, "videos", "audio_codec", "aac", {"aac"}),
     )
+    watermark_enabled = _boolean(parser, config_path, "watermark", "enabled", True)
     font_value = parser.get("watermark", "font", fallback="bundled").strip()
     if not font_value:
         raise _error(config_path, "watermark", "font", "must be 'bundled' or a valid font path")
@@ -175,14 +238,15 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     else:
         configured_font = Path(font_value).expanduser()
         font_path = (configured_font if configured_font.is_absolute() else config_path.parent / configured_font).resolve()
-        if not font_path.is_file():
-            raise _error(config_path, "watermark", "font", f"font file does not exist: {font_path}")
-        try:
-            ImageFont.truetype(str(font_path), 12)
-        except OSError as error:
-            raise _error(config_path, "watermark", "font", f"font file cannot be loaded: {font_path}") from error
+        if watermark_enabled:
+            if not font_path.is_file():
+                raise _error(config_path, "watermark", "font", f"font file does not exist: {font_path}")
+            try:
+                ImageFont.truetype(str(font_path), 12)
+            except OSError as error:
+                raise _error(config_path, "watermark", "font", f"font file cannot be loaded: {font_path}") from error
     watermark = WatermarkConfig(
-        enabled=_boolean(parser, config_path, "watermark", "enabled", True),
+        enabled=watermark_enabled,
         font=font_value,
         font_path=font_path,
         font_size=_integer(parser, config_path, "watermark", "font_size", None, 6, 256, allow_auto=True),
@@ -192,9 +256,22 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         }),
         margin=_integer(parser, config_path, "watermark", "margin", None, 0, 1024, allow_auto=True),
     )
+    tool_values: dict[str, str] = {}
+    for tool_key in ("ffmpeg", "ffprobe"):
+        raw_tool = parser.get("tools", tool_key, fallback="auto").strip()
+        if not raw_tool:
+            raise _error(config_path, "tools", tool_key, "must be 'auto' or a valid executable name or path")
+        if raw_tool.casefold() == "auto":
+            tool_values[tool_key] = "auto"
+        else:
+            try:
+                tool_values[tool_key] = resolve_explicit_executable(raw_tool, base_dir=config_path.parent)
+            except ValueError as error:
+                raise _error(config_path, "tools", tool_key, str(error)) from error
+    tools = ToolsConfig(ffmpeg=tool_values["ffmpeg"], ffprobe=tool_values["ffprobe"])
     if videos.max_dimension % 2:
         raise _error(config_path, "videos", "max_dimension", "must be even for MP4-compatible output dimensions")
-    return AppConfig(general, images, videos, watermark, config_path)
+    return AppConfig(general, images, videos, watermark, config_path, tools)
 
 
 def resolve_vault_directory(vault: str | Path, configured: str) -> Path:

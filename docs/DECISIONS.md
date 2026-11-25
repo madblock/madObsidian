@@ -141,3 +141,19 @@ This document records the key architectural decisions in **madObsidian**, their 
 - **Decision:** Keep `AGENTS.md` focused strictly on durable operational rules and safety conventions for coding agents (how to work safely in the repo, including keeping docs synchronized with code/test changes), while keeping product behavior, design rationale, current state, quality gates, and roadmap in `docs/` and `CHANGELOG.md`.
 - **Consequences:**
   - Product evolution updates `docs/` and `CHANGELOG.md` automatically alongside code/test changes without conflating specifications with agent guardrails.
+
+---
+
+## ADR-011: Independent Lazy/Explicit Executable Resolution for FFmpeg and ffprobe (`[tools]`)
+
+- **Status:** Accepted and implemented (`0.2.2`)
+- **Evidence:** Verified in code/tests (`config.py`, `video_previews.py`, `archive.py`, `cli.py`, `config.example.ini`, `tests/test_config.py`).
+- **Context:** Users running portable FFmpeg builds on Windows or custom Linux layouts previously had to set `MADOBSIDIAN_FFMPEG` and `MADOBSIDIAN_FFPROBE` environment variables in every shell or scheduled task. At the same time, image-only vaults and unit-test environments without FFmpeg installed must not fail at configuration load time.
+- **Decision:**
+  - Add an optional `[tools]` section (`ffmpeg = auto`, `ffprobe = auto`) to `config.ini` and `config.example.ini`, preserving backward compatibility for configs omitting `[tools]`.
+  - Resolve each tool independently with precedence: environment variable → explicit `[tools]` value → `PATH` (`auto`).
+  - Keep `auto` lazy (no startup check in `load_config()`), while validating explicit values strictly without silent fallback: paths with path components resolve against `config_path.parent` (or CWD for env vars); bare names resolve strictly through `shutil.which()`; POSIX checks `os.X_OK`.
+  - Thread `config.tools` consistently through `import`, `verify`, and `rebuild-index`.
+- **Consequences:**
+  - Machine-local `config.ini` can pin portable tool paths without breaking `config.example.ini` portability or image-only workflows.
+  - Trade-off: Environment variables still override valid `[tools]` entries at runtime, while an invalid explicit `[tools]` value in `config.ini` fails fast during `load_config()` rather than being silently ignored.

@@ -1,10 +1,10 @@
 # madObsidian
 
-madObsidian is a local-first personal media archive and Obsidian vault integration tool (current release: `0.2.1`). It moves referenced media from an Obsidian vault's `Incoming/` directory into SHA-256-verified, UUID-addressed object directories, generates watermarked WebP image previews and full-length H.264/AAC MP4 video previews for large files, and rewrites vault Markdown wikilinks safely with crash recovery.
+madObsidian is a local-first personal media archive and Obsidian vault integration tool (current release: `0.2.2`). It moves referenced media from an Obsidian vault's `Incoming/` directory into SHA-256-verified, UUID-addressed object directories, generates watermarked WebP image previews and full-length H.264/AAC MP4 video previews for large files, and rewrites vault Markdown wikilinks safely with crash recovery.
 
 ## Quick Start
 
-Requires **Python 3.11+** and **Pillow (`>=10.0`)** (the sole Python runtime dependency). Video previews and verification of archives containing video previews also require `ffmpeg` (with `libx264` and `aac`) and `ffprobe` on `PATH` or configured via `MADOBSIDIAN_FFMPEG` and `MADOBSIDIAN_FFPROBE`.
+Requires **Python 3.11+** and **Pillow (`>=10.0`)** (the sole Python runtime dependency). Video previews and verification of archives containing video previews also require `ffmpeg` (with `libx264` and `aac`) and `ffprobe`, resolved independently in precedence order: `MADOBSIDIAN_FFMPEG`/`MADOBSIDIAN_FFPROBE` environment variables → `[tools]` in `config.ini` → `PATH`.
 
 On Windows (PowerShell):
 
@@ -42,7 +42,7 @@ python -m unittest discover -s tests -v
 
 ### Key Usage Notes
 
-- **Vault mode (`import <vault>`):** Moves referenced, direct-child media files from `Incoming/` into `objects/<uuid>/{shared|originals}/`, rewrites Markdown wikilinks/embeds (adding `madobsidian://<UUID>` original links for large files), serializes runs with a per-vault lock in `vault.parent`, logs failures to `vault.parent/import.log`, and records safely rolled-back failures in `exclusions.ini` (`[ignore]`). Supports `--dry-run` with unified Markdown diffs.
+- **Vault mode (`import <vault>`):** Moves referenced, direct-child media files from `Incoming/` into `objects/<uuid>/{shared|originals}/`, rewrites Markdown wikilinks/embeds (adding `madobsidian://<UUID>` original links for large files), serializes runs with a per-vault lock in `vault.parent`, logs failures to `vault.parent/import.log`, and records safely rolled-back failures in `exclusions.ini` (`[ignore]`). Supports `--dry-run` with unified Markdown diffs and separate pending-recovery counts.
 - **Legacy mode (`import <src> <archive>`):** Copy-only importer for compatibility; does not modify sources, rewrite Markdown, use transactions/exclusions, or accept `--dry-run`.
 - **Verification (`verify` / `rebuild-index`):** Pass the vault or archive root containing `index.json` (not `objects/` itself), along with the same `--config` if custom `objects_directory` or `small_file_threshold_bytes` settings are used. `rebuild-index` refuses to replace `index.json` if any archive problem is found.
 - **Failures and retries:** If read of large file fails at any point, it leaves the file and corresponding links in .md files untouched and makes an entry in `exclusions.ini` under `[ignore]` section in order not to encounter the failure next time. If the user want the app to revisit the large file, it should remove the corresponding entry from the `exclusions.ini`
@@ -56,7 +56,8 @@ Default key settings:
 - `[general]`: `incoming_directory = Incoming`, `objects_directory = objects`, `small_file_threshold_bytes = 256000`
 - `[images]`: `max_dimension = 960`, `format = webp`, `quality = 85`, `method = 6`
 - `[videos]`: `max_dimension = 400` (even), `format = mp4`, `video_codec = libx264`, `video_crf = 25`, `preset = medium`, `audio_codec = aac`
-- `[watermark]`: `enabled = true`, `font = bundled` (DejaVu Sans 2.37), `font_size = auto`, `opacity = auto`, `position = bottom-left`, `margin = auto`
+- `[watermark]`: `enabled = true`, `font = bundled` (DejaVu Sans 2.37; custom fonts are validated only when `enabled = true`), `font_size = auto`, `opacity = auto`, `position = bottom-left`, `margin = auto`
+- `[tools]`: `ffmpeg = auto`, `ffprobe = auto` (optional; `auto` discovers lazily on `PATH` only when needed)
 
 See [docs/SPECIFICATION.md](docs/SPECIFICATION.md) for full configuration rules, path resolution, and `exclusions.ini` details.
 

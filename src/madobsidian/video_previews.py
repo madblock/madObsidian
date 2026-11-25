@@ -18,7 +18,13 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from madobsidian.config import AppConfig, DEFAULT_CONFIG, VideoConfig, WatermarkConfig
+from madobsidian.config import (
+    AppConfig,
+    DEFAULT_CONFIG,
+    VideoConfig,
+    WatermarkConfig,
+    resolve_explicit_executable,
+)
 
 
 VIDEO_PREVIEW_THRESHOLD_BYTES = DEFAULT_CONFIG.general.small_file_threshold_bytes
@@ -67,19 +73,26 @@ def is_video_candidate(filename: str, size_bytes: int, threshold_bytes: int = DE
     return bool(mime_type and mime_type.startswith("video/")) or Path(filename).suffix.casefold() in VIDEO_EXTENSIONS
 
 
-def _executable(env_name: str, default_name: str) -> str:
-    configured = os.environ.get(env_name)
-    if configured:
-        candidate = Path(configured)
-        if candidate.is_file():
-            return str(candidate)
-        located = shutil.which(configured)
-        if located:
-            return located
-        raise VideoPreviewError(f"{env_name} does not name an executable file: {configured}")
+def _executable(env_name: str, default_name: str, configured: str = "auto") -> str:
+    env_value = os.environ.get(env_name)
+    if env_value is not None and env_value != "":
+        try:
+            return resolve_explicit_executable(env_value)
+        except ValueError as error:
+            raise VideoPreviewError(f"{env_name} does not name an executable file: {env_value} ({error})") from error
+    cleaned = configured.strip()
+    if cleaned and cleaned.casefold() != "auto":
+        try:
+            return resolve_explicit_executable(cleaned)
+        except ValueError as error:
+            raise VideoPreviewError(
+                f"Configured [tools] {default_name} does not name an executable file: {configured} ({error})"
+            ) from error
     located = shutil.which(default_name)
     if not located:
-        raise VideoPreviewError(f"Cannot find {default_name}; configure {env_name} or add it to PATH")
+        raise VideoPreviewError(
+            f"Cannot find {default_name}; configure [tools] {default_name}, set {env_name}, or add it to PATH"
+        )
     return located
 
 
@@ -429,8 +442,8 @@ def generate_video_preview(
     watermark_settings = config.watermark
     if not is_video_candidate(original_filename, original_size_bytes, config.general.small_file_threshold_bytes):
         return None
-    ffmpeg = _executable("MADOBSIDIAN_FFMPEG", "ffmpeg")
-    ffprobe = _executable("MADOBSIDIAN_FFPROBE", "ffprobe")
+    ffmpeg = _executable("MADOBSIDIAN_FFMPEG", "ffmpeg", config.tools.ffmpeg)
+    ffprobe = _executable("MADOBSIDIAN_FFPROBE", "ffprobe", config.tools.ffprobe)
     info = _inspect_video(ffprobe, original_copy)
     if info is None:
         raise VideoPreviewError(f"Eligible video candidate has no video stream: {original_filename}")

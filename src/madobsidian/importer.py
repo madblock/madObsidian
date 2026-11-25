@@ -46,6 +46,7 @@ class ImportBatchResult(list[dict[str, object]]):
 
     def __init__(self) -> None:
         super().__init__()
+        self.recoveries: list[dict[str, object]] = []
         self.skipped: list[dict[str, str]] = []
         self.ignored: list[dict[str, str]] = []
         self.failures: list[dict[str, str | bool]] = []
@@ -882,7 +883,7 @@ def _import_vault_locked(vault: str | Path, *, dry_run: bool = False,
     ]
     if dry_run:
         for row in recovery_rows:
-            batch.append({**row, "target": "", "changes": {}})
+            batch.recoveries.append(dict(row))
     referenced_set = set(referenced_files)
     for source in media_files:
         if source not in referenced_set and source in candidate_plans:

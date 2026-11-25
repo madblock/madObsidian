@@ -1,5 +1,7 @@
 """Synthetic vault integration tests."""
 
+import contextlib
+import io
 import json
 import hashlib
 import os
@@ -10,6 +12,7 @@ from unittest import mock
 from pathlib import Path
 
 from madobsidian.archive import rebuild_index, scan_archive
+from madobsidian.cli import main as cli_main
 from madobsidian import importer
 from madobsidian.config import load_config
 from madobsidian.importer import import_vault
@@ -384,8 +387,68 @@ class VaultImportTests(unittest.TestCase):
         rows = import_vault(self.vault, dry_run=True)
         after = {p.relative_to(self.vault).as_posix(): p.read_bytes() for p in self.vault.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
+        self.assertEqual(len(rows), 0)
+        self.assertEqual(len(rows.recoveries), 1)
+        self.assertIn("pending", rows.recoveries[0]["action"])
+
+    def test_dry_run_with_no_pending_recoveries_counts_only_planned_imports(self):
+        source = self.vault / "Incoming" / "clean.jpg"
+        source.write_bytes(b"planned bytes")
+        (self.vault / "note.md").write_text("![[Incoming/clean.jpg]]", encoding="utf-8")
+
+        rows = import_vault(self.vault, dry_run=True)
         self.assertEqual(len(rows), 1)
-        self.assertIn("pending", rows[0]["action"])
+        self.assertEqual(rows.recoveries, [])
+        self.assertEqual(rows[0]["source"], "Incoming/clean.jpg")
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            status = cli_main(["import", str(self.vault), "--dry-run"])
+        self.assertEqual(status, 0)
+        self.assertIn("Would import 1 file(s); pending recoveries 0;", stdout.getvalue())
+        self.assertNotIn("Pending recovery:", stdout.getvalue())
+
+    def test_dry_run_separates_pending_recoveries_from_planned_imports_and_cli_reports_both(self):
+        self._leave_pending_import("pending.jpg")
+        fresh = self.vault / "Incoming" / "fresh.jpg"
+        fresh.write_bytes(b"fresh bytes")
+        (self.vault / "fresh.md").write_text("![[Incoming/fresh.jpg]]", encoding="utf-8")
+
+        before = {p.relative_to(self.vault).as_posix(): p.read_bytes() for p in self.vault.rglob("*") if p.is_file()}
+        rows = import_vault(self.vault, dry_run=True)
+        after = {p.relative_to(self.vault).as_posix(): p.read_bytes() for p in self.vault.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "Incoming/fresh.jpg")
+        self.assertEqual(len(rows.recoveries), 1)
+        self.assertEqual(rows.recoveries[0]["source"], "Incoming/pending.jpg")
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            status = cli_main(["import", str(self.vault), "--dry-run"])
+        self.assertEqual(status, 0)
+        output = stdout.getvalue()
+        self.assertIn("Would import 1 file(s); pending recoveries 1; skipped 0; ignored 0; failed 0.", output)
+        self.assertIn("Pending recovery:", output)
+        self.assertIn("Incoming/pending.jpg", output)
+        self.assertIn("Incoming/fresh.jpg", output)
+
+    def test_real_import_with_pending_recovery_retains_existing_result_semantics(self):
+        self._leave_pending_import("pending.jpg")
+        fresh = self.vault / "Incoming" / "fresh.jpg"
+        fresh.write_bytes(b"fresh bytes")
+        (self.vault / "fresh.md").write_text("![[Incoming/fresh.jpg]]", encoding="utf-8")
+
+        stdout = io.StringIO()
+        with self._without_previews()[0], self._without_previews()[1], contextlib.redirect_stdout(stdout):
+            status = cli_main(["import", str(self.vault)])
+        self.assertEqual(status, 0)
+        output = stdout.getvalue()
+        self.assertIn("Imported 1 file(s); skipped 0; ignored 0; failed 0.", output)
+        self.assertNotIn("pending recoveries", output)
+        self.assertFalse(fresh.exists())
+        self.assertEqual(len(list((self.vault / "objects").glob("[0-9a-f]*"))), 2)
+        self.assertFalse(list((self.vault / "objects").glob("*/transaction.json")))
 
     def test_configured_incoming_directory_is_used_for_path_matching(self):
         media = self.vault / "Media"

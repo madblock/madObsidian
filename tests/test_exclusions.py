@@ -49,6 +49,41 @@ class ExclusionsTests(unittest.TestCase):
         (self.vault / "note.md").write_text(f"![[Incoming/{filename}]]", encoding="utf-8")
         return source
 
+    def test_pre_hashing_failure_preserves_source_adds_exclusion_and_ignores_rerun(self) -> None:
+        filename = "unreadable-before-hash.jpg"
+        original_bytes = b"intact pre-hash bytes"
+        source = self.add_referenced_file(filename, original_bytes)
+        note = self.vault / "note.md"
+        original_note = note.read_text(encoding="utf-8")
+        expected_key = filename_key(filename)
+
+        with mock.patch("madobsidian.importer._sha256", side_effect=OSError("simulated read error")):
+            first = import_vault(self.vault, config=self.config)
+
+        self.assertEqual(first, [])
+        self.assertEqual(len(first.failures), 1)
+        self.assertFalse(first.failures[0]["serious"])
+        self.assertIn("simulated read error", first.failures[0]["reason"])
+        self.assertTrue(source.is_file())
+        self.assertEqual(source.read_bytes(), original_bytes)
+        self.assertEqual(note.read_text(encoding="utf-8"), original_note)
+        self.assertEqual(load_exclusions(self.exclusions_file), {expected_key: filename})
+        objects_dir = self.vault / "objects"
+        self.assertFalse(objects_dir.exists() and any(objects_dir.iterdir()))
+
+        with mock.patch("madobsidian.importer._sha256", side_effect=AssertionError("excluded file was hashed")), \
+                mock.patch("madobsidian.importer.generate_preview", side_effect=AssertionError("preview attempted")), \
+                mock.patch("madobsidian.importer.generate_video_preview", side_effect=AssertionError("video preview attempted")):
+            rerun = import_vault(self.vault, config=self.config)
+
+        self.assertEqual(rerun, [])
+        self.assertEqual(rerun.failures, [])
+        self.assertEqual(rerun.ignored, [{"source": filename, "reason": "listed in exclusions.ini"}])
+        self.assertTrue(source.is_file())
+        self.assertEqual(source.read_bytes(), original_bytes)
+        self.assertEqual(note.read_text(encoding="utf-8"), original_note)
+        self.assertFalse(objects_dir.exists() and any(objects_dir.iterdir()))
+
     def test_pre_transaction_failure_with_intact_source_adds_exclusion(self) -> None:
         filename = "planning-fail.jpg"
         source = self.add_referenced_file(filename, b"intact original")

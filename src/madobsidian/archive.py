@@ -21,7 +21,7 @@ from madobsidian.video_previews import _executable, _inspect_video, is_video_can
 from madobsidian.previews import is_registered_image_filename
 from PIL import Image, UnidentifiedImageError
 
-from madobsidian.config import DEFAULT_CONFIG
+from madobsidian.config import DEFAULT_CONFIG, ToolsConfig
 
 @dataclass(frozen=True)
 class ArchiveObject:
@@ -123,7 +123,8 @@ def _validate_metadata(data: Any, directory_id: str) -> str | None:
     return None
 
 
-def _scan_object(directory: Path, small_file_threshold_bytes: int) -> ArchiveObject | ArchiveProblem:
+def _scan_object(directory: Path, small_file_threshold_bytes: int,
+                 tools: ToolsConfig = DEFAULT_CONFIG.tools) -> ArchiveObject | ArchiveProblem:
     object_id = directory.name
     if directory.is_symlink():
         return ArchiveProblem(object_id, "object directory is a symbolic link")
@@ -183,7 +184,7 @@ def _scan_object(directory: Path, small_file_threshold_bytes: int) -> ArchiveObj
         return ArchiveProblem(object_id, str(error))
     if actual_hash != data["sha256"].lower():
         return ArchiveProblem(object_id, "original file SHA-256 does not match metadata")
-    preview_error = _validate_expected_preview(directory, original, data, small_file_threshold_bytes)
+    preview_error = _validate_expected_preview(directory, original, data, small_file_threshold_bytes, tools)
     if preview_error:
         return ArchiveProblem(object_id, preview_error)
     previews = directory / "previews"
@@ -205,7 +206,8 @@ def _scan_object(directory: Path, small_file_threshold_bytes: int) -> ArchiveObj
 
 
 def _validate_expected_preview(directory: Path, original: Path, metadata: dict[str, Any],
-                               small_file_threshold_bytes: int) -> str | None:
+                               small_file_threshold_bytes: int,
+                               tools: ToolsConfig = DEFAULT_CONFIG.tools) -> str | None:
     if metadata["size_bytes"] < small_file_threshold_bytes:
         return None
     expected: str | None = None
@@ -239,8 +241,8 @@ def _validate_expected_preview(directory: Path, original: Path, metadata: dict[s
             return f"image preview cannot be decoded: {error}"
         return None
     try:
-        ffprobe = _executable("MADOBSIDIAN_FFPROBE", "ffprobe")
-        ffmpeg = _executable("MADOBSIDIAN_FFMPEG", "ffmpeg")
+        ffprobe = _executable("MADOBSIDIAN_FFPROBE", "ffprobe", tools.ffprobe)
+        ffmpeg = _executable("MADOBSIDIAN_FFMPEG", "ffmpeg", tools.ffmpeg)
         info = _inspect_video(ffprobe, preview)
         if info is None or info.video.get("codec_name") != "h264":
             return "video preview is not a decodable H.264 video"
@@ -279,8 +281,10 @@ def _resolve_objects_directory(root: Path, configured: str | Path) -> tuple[Path
 
 
 def scan_archive(archive: str | Path, *, objects_directory: str | Path = "objects",
-                 small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes) -> ScanReport:
+                 small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes,
+                 tools: ToolsConfig | None = None) -> ScanReport:
     """Validate UUID object directories without modifying the archive."""
+    resolved_tools = tools or DEFAULT_CONFIG.tools
     root = Path(archive)
     if root.is_symlink():
         return ScanReport((), (ArchiveProblem("archive", "archive root is a symbolic link"),))
@@ -318,7 +322,7 @@ def scan_archive(archive: str | Path, *, objects_directory: str | Path = "object
         if entry.name != str(parsed_id):
             problems.append(ArchiveProblem(entry.name, "object directory name must use canonical lowercase UUID syntax"))
             continue
-        result = _scan_object(entry, small_file_threshold_bytes)
+        result = _scan_object(entry, small_file_threshold_bytes, resolved_tools)
         if isinstance(result, ArchiveProblem):
             problems.append(result)
         else:
@@ -329,11 +333,13 @@ def scan_archive(archive: str | Path, *, objects_directory: str | Path = "object
 
 
 def rebuild_index(archive: str | Path, *, objects_directory: str | Path = "objects",
-                  small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes) -> ScanReport:
+                  small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes,
+                  tools: ToolsConfig | None = None) -> ScanReport:
     """Rebuild the disposable JSON index, refusing replacement on bad objects."""
     root = Path(archive)
     report = scan_archive(root, objects_directory=objects_directory,
-                          small_file_threshold_bytes=small_file_threshold_bytes)
+                          small_file_threshold_bytes=small_file_threshold_bytes,
+                          tools=tools)
     if report.problems:
         return report
     if root.is_symlink():

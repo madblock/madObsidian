@@ -1,6 +1,6 @@
 # madObsidian Specification
 
-This document is the authoritative technical and functional specification for **madObsidian** (current release: `0.2.1`). It describes both what the current implementation does and what the system is intended to do, explicitly marking discrepancies, unresolved questions, and future scope.
+This document is the authoritative technical and functional specification for **madObsidian** (current release: `0.2.2`). It describes both what the current implementation does and what the system is intended to do, explicitly marking discrepancies, unresolved questions, and future scope.
 
 For architectural rationale, see [DECISIONS.md](DECISIONS.md). For current implementation status, known bugs, and technical debt, see [PROGRESS.md](PROGRESS.md). For quality gates, see [ACCEPTANCE_CRITERIA.md](ACCEPTANCE_CRITERIA.md).
 
@@ -38,10 +38,10 @@ All application source lives under `src/madobsidian/` (Python `>= 3.11`, single 
 
 | Module | Responsibility |
 | --- | --- |
-| `__init__.py` | Package version (`__version__ = "0.2.1"`). |
+| `__init__.py` | Package version (`__version__ = "0.2.2"`). |
 | `__main__.py` | Enables `python -m madobsidian`. |
 | `cli.py` | Argument parsing (`argparse`), command dispatch, human-readable stdout/stderr reporting, dry-run unified diffs, exit codes. |
-| `config.py` | Strict INI parsing and validation (`AppConfig`), built-in `DEFAULT_CONFIG`, safe vault-bounded directory resolution (`resolve_vault_directory`). |
+| `config.py` | Strict INI parsing and validation (`AppConfig`, `ToolsConfig`), built-in `DEFAULT_CONFIG`, explicit executable resolution (`resolve_explicit_executable`), safe vault-bounded directory resolution (`resolve_vault_directory`). |
 | `filenames.py` | Cross-platform validation of archived original filenames (`filename_problem`). |
 | `locking.py` | Cross-process persistent file locks (`process_lock`, `vault_lock_path`, `vault_import_lock`) via `msvcrt` (Windows) and `fcntl` (POSIX). |
 | `exclusions.py` | Persistent failed-import exclusions in `exclusions.ini` (`load_exclusions`, `append_exclusion`, `exclusion_path`, `filename_key`). |
@@ -181,7 +181,7 @@ Verified in `src/madobsidian/config.py` and `config.example.ini`.
 - Files are read as `utf-8-sig` with `ConfigParser(interpolation=None, strict=True)`.
 - **Fail-closed validation:** Unknown sections, unknown keys, `DEFAULT` entries, out-of-range numbers, invalid booleans, unsupported formats/codecs, odd video `max_dimension`, and missing/unreadable custom font files fail before processing with `ConfigError` naming the config path, section, and key.
 - **Directory constraints:** `incoming_directory` and `objects_directory` may be relative (resolved from vault root) or absolute, must resolve strictly inside the vault without traversing symlinks, and cannot overlap or nest inside each other (`importer.py:757-758`).
-- **Font path resolution:** Non-`bundled` font paths expand `~`; relative paths resolve from `config_path.parent`, *not* the current working directory. Note (verified in `config.py:172-183`): currently, custom font files are checked for existence and loaded via `ImageFont.truetype` at startup even if `watermark.enabled = false` *(planned for `0.2.2`: skip custom font validation when `watermark.enabled = false` while retaining strict validation when enabled)*.
+- **Font path resolution:** Non-`bundled` font paths expand `~`; relative paths resolve from `config_path.parent`, *not* the current working directory. When `watermark.enabled = true`, custom font files are strictly validated for existence and loadability via `ImageFont.truetype` at startup; when `watermark.enabled = false`, custom font existence and Pillow loading are skipped (`config.py:227-244`).
 
 | Section | Key | Default | Allowed Values / Bounds |
 | --- | --- | --- | --- |
@@ -204,12 +204,22 @@ Verified in `src/madobsidian/config.py` and `config.example.ini`.
 | `[watermark]` | `opacity` | `auto` | `auto` or integer `0` to `255`. |
 | `[watermark]` | `position` | `bottom-left` | `bottom-left`, `bottom-right`, `top-left`, `top-right`. |
 | `[watermark]` | `margin` | `auto` | `auto` or integer `0` to `1024`. |
+| `[tools]` | `ffmpeg` | `auto` | `auto` (lazy `PATH` lookup) or explicit executable path / bare executable name. |
+| `[tools]` | `ffprobe` | `auto` | `auto` (lazy `PATH` lookup) or explicit executable path / bare executable name. |
 
-**Environment variables (verified in `video_previews.py:70-83`):**
+**External tool resolution (`config.py:resolve_explicit_executable`, `video_previews.py:_executable`, `archive.py`, `cli.py`):**
 
-- `MADOBSIDIAN_FFMPEG`: Path or `PATH`-resolvable executable name for `ffmpeg` (default: `ffmpeg`).
-- `MADOBSIDIAN_FFPROBE`: Path or `PATH`-resolvable executable name for `ffprobe` (default: `ffprobe`).
-- **Planned for next release (`0.2.2`, not yet implemented):** Optional `[tools]` section (`ffmpeg = auto`, `ffprobe = auto`) with independent precedence `MADOBSIDIAN_FFMPEG`/`MADOBSIDIAN_FFPROBE` → `[tools]` → `PATH`, lazy `auto` `PATH` discovery, relative paths with path components resolved against `config_path.parent`, absolute paths and `shutil.which()` bare executable names supported, clear failure on explicit invalid values without fallback, and shared resolution across `import`, `verify`, and `rebuild-index`. See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+- `ffmpeg` and `ffprobe` are resolved **independently**, using strict precedence:
+  1. Environment variable: `MADOBSIDIAN_FFMPEG` / `MADOBSIDIAN_FFPROBE` (non-empty value).
+  2. Explicit value in `[tools]` (`ffmpeg` / `ffprobe`). Omitting `[tools]` defaults both to `auto`.
+  3. Automatic `PATH` discovery via `shutil.which()`.
+- **Lazy `auto` discovery:** When `[tools]` is `auto` (or omitted), `load_config()` does not require `ffmpeg` or `ffprobe` to exist; discovery occurs only when a video preview or video archive verification actually runs, failing with an actionable `VideoPreviewError` if unavailable.
+- **Fail-closed explicit validation (no silent fallback):**
+  - Relative paths containing path components resolve relative to `config_path.parent` (for `[tools]`) or the current working directory (for environment variables); absolute paths and `~` expansion are supported.
+  - Bare executable names without path components (e.g., `my-ffmpeg`) resolve strictly through `shutil.which()` and are **not** interpreted relative to `config_path.parent`.
+  - On POSIX, resolved files must exist and have execute permission (`os.X_OK`). On Windows, existing files and `PATHEXT` executable lookups via `shutil.which()` are supported.
+  - Invalid explicit values in `[tools]` fail at `load_config()` with `ConfigError`; invalid environment variables fail at execution with `VideoPreviewError` without falling back to `[tools]` or `PATH`.
+- **Consistent CLI integration:** `import`, `verify`, and `rebuild-index` all thread `config.tools` through the same `_executable()` resolver.
 
 ---
 
@@ -220,14 +230,12 @@ Verified in `src/madobsidian/cli.py`.
 | Command | Mode / Behavior | Exit Codes |
 | --- | --- | --- |
 | `madObsidian` (bare) / `--help` | Prints argparse help. | `0` |
-| `madObsidian --version` | Prints `madObsidian 0.2.1`. | `0` |
-| `madObsidian status` | **Placeholder stub:** prints `madObsidian 0.2.1: ready (no archive configured)` without inspecting any vault or config. | `0` |
-| `madObsidian import <vault> [--dry-run] [--config INI]` | Vault import mode (`import_vault`). Prints summary (`Imported` or `Would import` count, `skipped`, `ignored`, `failed`), per-file lines, recovery/ambiguity/Markdown info (plus unified diffs in `--dry-run`), `Skipped:`, `Ignored:`, and stderr `Failed:` / `Recovery Error:` lines. | `0` if `failures` is empty; `1` if any file failed or a fatal error occurred. |
+| `madObsidian --version` | Prints `madObsidian 0.2.2`. | `0` |
+| `madObsidian status` | **Placeholder stub:** prints `madObsidian 0.2.2: ready (no archive configured)` without inspecting any vault or config. | `0` |
+| `madObsidian import <vault> [--dry-run] [--config INI]` | Vault import mode (`import_vault`). Prints summary (`Imported N file(s); skipped ...; ignored ...; failed ...` for real runs; `Would import N file(s); pending recoveries M; skipped ...; ignored ...; failed ...` for `--dry-run`), `Pending recovery:` lines, per-file planned/imported lines (plus unified diffs in `--dry-run`), `Skipped:`, `Ignored:`, and stderr `Failed:` / `Recovery Error:` lines. | `0` if `failures` is empty; `1` if any file failed or a fatal error occurred. |
 | `madObsidian import <src> <archive> [--config INI]` | Legacy copy-only mode (`import_path`). Rejects `--dry-run` with exit `1`. Does not rewrite Markdown, use transactions, use exclusions, or acquire the vault lock. | `0` on full success; `1` on first error. |
-| `madObsidian verify <root> [--config INI]` | Calls `scan_archive` without modifying files. Prints `Problem:` (stderr) and `Valid:` (stdout). Pass the vault/archive root containing `index.json`, not `objects/`. | `0` if no problems; `1` if any problem or error. |
-| `madObsidian rebuild-index <root> [--config INI]` | Calls `rebuild_index`. Atomically replaces `<root>/index.json` only if `scan_archive` finds zero problems. | `0` if rebuilt; `1` if any problem or error (existing `index.json` untouched). |
-
-**Observed CLI nuance (verified in `cli.py:55` and `importer.py:883-885`):** During `--dry-run`, pending `recovery_rows` are appended to `batch`, so the summary `"Would import N file(s)"` counts both pending recovery actions and newly planned imports. During real runs, `recovery_rows` are not appended to `batch`.
+| `madObsidian verify <root> [--config INI]` | Calls `scan_archive` (forwarding `config.tools`) without modifying files. Prints `Problem:` (stderr) and `Valid:` (stdout). Pass the vault/archive root containing `index.json`, not `objects/`. | `0` if no problems; `1` if any problem or error. |
+| `madObsidian rebuild-index <root> [--config INI]` | Calls `rebuild_index` (forwarding `config.tools`). Atomically replaces `<root>/index.json` only if `scan_archive` finds zero problems. | `0` if rebuilt; `1` if any problem or error (existing `index.json` untouched). |
 
 ---
 
@@ -254,7 +262,7 @@ Verified in `src/madobsidian/importer.py` (`import_vault`, `_import_vault_locked
    - Computes active wikilink replacements and records any basename/Unicode ambiguities.
    - Files with zero planned Markdown edits *and* not part of any ambiguity are added to `batch.skipped` (`"no matching Markdown reference"`).
    - **Verified current behavior (known Phase 2 correctness issue):** If two candidates in `Incoming/` collide under NFC normalization and trigger an ambiguity on a basename-only link, the link is left unchanged, *yet both candidates are still treated as referenced and moved into `objects/`* (`importer.py:878-882`, verified by `test_vault_import.py:155-179`), which can leave links unresolved. Planned Phase 2 correction: leave ambiguous candidates in `Incoming/` as skipped/ambiguous (see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)).
-7. **Dry-run branch:** If `dry_run=True`, appends recovery rows and planned candidate rows to `batch` and returns without modifying the vault, `exclusions.ini`, or `import.log`. (Acquiring `vault_import_lock` may create `.madobsidian-vault-<sha256>.lock` in `vault.parent`.)
+7. **Dry-run branch:** If `dry_run=True`, records pending recovery operations in `batch.recoveries` and planned candidate imports in `batch` (so `len(batch)` reflects planned imports only, separate from `batch.recoveries`, `batch.skipped`, `batch.ignored`, and `batch.failures`) and returns without modifying the vault, `exclusions.ini`, or `import.log`. (Acquiring `vault_import_lock` may create `.madobsidian-vault-<sha256>.lock` in `vault.parent`.)
 8. **Per-file transactional import (`_import_file` + finalization):**
    - Creates staging directory `objects/.incomplete-<random>` via `tempfile.mkdtemp`.
    - Chooses destination subfolder: `shared/` if `size_bytes < small_file_threshold_bytes`, else `originals/`.
@@ -378,8 +386,8 @@ Verified in `src/madobsidian/archive.py`:
 
 ## 11. Summary of Known Discrepancies (Code vs. Intent)
 
-| Area | Documented / Intended Behavior | Actual `0.2.1` Behavior | Reference |
+| Area | Documented / Intended Behavior | Actual `0.2.2` Behavior | Reference |
 | --- | --- | --- | --- |
 | `madObsidian status` | Application/archive status command. | Static stub printing `ready (no archive configured)`. | `cli.py:44-46` |
-| Dry-run summary count | Count of files that would be imported. | Includes pending `recovery_rows` in `len(rows)` during `--dry-run`. | `importer.py:883-885`, `cli.py:55` |
 | Non-UUID dirs in `objects/` | Should be detected and reported. | Silently skipped during `scan_archive`. | `archive.py:314-317` |
+| NFC-equivalent basename ambiguity | Leave ambiguous candidates in `Incoming/` (Phase 2 correction). | Moves both candidates into `objects/` while leaving basename-only link unchanged. | `importer.py:878-882` |

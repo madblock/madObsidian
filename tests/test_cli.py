@@ -15,7 +15,7 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as exit_info:
             main(["--version"])
         self.assertEqual(exit_info.exception.code, 0)
-        self.assertEqual(output.getvalue().strip(), "madObsidian 0.2.1")
+        self.assertEqual(output.getvalue().strip(), "madObsidian 0.2.2")
 
     def test_status(self) -> None:
         output = io.StringIO()
@@ -24,7 +24,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(
             output.getvalue().strip(),
-            "madObsidian 0.2.1: ready (no archive configured)",
+            "madObsidian 0.2.2: ready (no archive configured)",
         )
 
     def test_help(self) -> None:
