@@ -36,11 +36,6 @@ VIDEO_EXTENSIONS = frozenset(
         ".mpv", ".mts", ".mxf", ".ogv", ".ts", ".vob", ".webm", ".wmv",
     }
 )
-# On the supplied Windows FFmpeg build, the integration experiment measured
-# identical relative source/output PTS and frame intervals (0 s maximum error)
-# with both `filter` and `demux`; `filter` explicitly selects the filtergraph TB.
-ENCODER_TIME_BASE = "filter"
-
 
 class VideoPreviewError(OSError):
     """Raised when an eligible video cannot be inspected or previewed."""
@@ -99,14 +94,18 @@ def _executable(env_name: str, default_name: str, configured: str = "auto") -> s
 def _run_json_probe(ffprobe: str, arguments: list[str], path: Path) -> dict[str, Any]:
     command = [ffprobe, "-v", "error", *arguments, "-of", "json", str(path)]
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    except OSError as error:
+        with tempfile.TemporaryFile() as output:
+            completed = subprocess.run(command, stdout=output, stderr=subprocess.DEVNULL, check=False, timeout=120)
+            output.seek(0)
+            payload = output.read(1024 * 1024 + 1)
+    except (OSError, subprocess.TimeoutExpired) as error:
         raise VideoPreviewError(f"Could not start ffprobe: {error}") from error
     if completed.returncode:
-        details = completed.stderr.strip()[-2000:]
-        raise VideoPreviewError(f"ffprobe failed for {path.name}: {details or completed.returncode}")
+        raise VideoPreviewError(f"ffprobe failed for {path.name}: {completed.returncode}")
+    if len(payload) > 1024 * 1024:
+        raise VideoPreviewError(f"ffprobe metadata exceeds scan limit for {path.name}")
     try:
-        return json.loads(completed.stdout)
+        return json.loads(payload)
     except json.JSONDecodeError as error:
         raise VideoPreviewError(f"ffprobe returned invalid JSON for {path.name}") from error
 
@@ -189,11 +188,15 @@ def _probe_timeline(ffprobe: str, path: Path, selector: str, time_base: Fraction
     ticks: list[int] = []
     invalid = 0
     try:
-        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as errors:
+        with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True, encoding="utf-8")
             assert process.stdout is not None
             with process.stdout:
                 for line in process.stdout:
+                    if len(ticks) + invalid >= 1_000_000:
+                        process.kill()
+                        process.wait()
+                        raise VideoPreviewError(f"Frame scan limit reached for {path.name}")
                     fields = line.strip().split("|")
                     record = dict(field.split("=", 1) for field in fields if "=" in field)
                     value = record.get("best_effort_timestamp")
@@ -202,8 +205,8 @@ def _probe_timeline(ffprobe: str, path: Path, selector: str, time_base: Fraction
                     except (TypeError, ValueError):
                         invalid += 1
             return_code = process.wait()
-            errors.seek(0)
-            error_text = errors.read().strip()[-2000:]
+            errors.seek(max(0, os.fstat(errors.fileno()).st_size - 2000))
+            error_text = errors.read(2000).decode("utf-8", "replace").strip()
     except OSError as error:
         raise VideoPreviewError(f"Could not run ffprobe frame scan: {error}") from error
     if return_code:
@@ -466,7 +469,7 @@ def generate_video_preview(
     )
     preview_directory.mkdir(parents=True, exist_ok=True)
     final_path = preview_directory / f"preview.{video_settings.format}"
-    time_base = encoder_time_base or ENCODER_TIME_BASE
+    time_base = encoder_time_base or f"{info.video_time_base.numerator}:{info.video_time_base.denominator}"
     try:
         with tempfile.TemporaryDirectory(prefix=".video-work-", dir=preview_directory.parent) as work:
             work_dir = Path(work)

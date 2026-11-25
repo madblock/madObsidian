@@ -6,6 +6,8 @@ History prior to the creation of this changelog is reconstructed strictly from G
 
 ## [Unreleased]
 
+- Serialize archive verification and index replacement with vault imports. Preserve the index on incomplete sync, bounded metadata scans and decoder failures. Use the numeric input video time base for older FFmpeg builds.
+
 - Journal object preparation, Markdown completion and rollback progress. Standalone recovery now serializes with vault imports.
 
 ## [0.2.2] - 2026-11-25

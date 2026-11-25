@@ -6,16 +6,19 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
 import uuid
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from itertools import islice
 from typing import Any
 
+from madobsidian.locking import vault_import_lock
+from madobsidian.synchronization import sync_artifact
 from madobsidian.filenames import filename_problem
 from madobsidian.video_previews import _executable, _inspect_video, is_video_candidate
 from madobsidian.previews import is_registered_image_filename
@@ -43,10 +46,19 @@ class ScanReport:
     objects: tuple[ArchiveObject, ...]
     problems: tuple[ArchiveProblem, ...]
 
+    @property
+    def complete(self) -> bool:
+        """Every observed entry was verified within the resource limits."""
+        return not self.problems
+
 
 class ArchiveError(Exception):
     """Raised when an archive cannot be safely scanned or indexed."""
 
+
+MAX_METADATA_BYTES = 1024 * 1024
+MAX_OBJECTS = 100_000
+MAX_SCAN_METADATA_BYTES = 64 * 1024 * 1024
 
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 _REQUIRED = {
@@ -130,6 +142,15 @@ def _scan_object(directory: Path, small_file_threshold_bytes: int,
         return ArchiveProblem(object_id, "object directory is a symbolic link")
     if not directory.is_dir():
         return ArchiveProblem(object_id, "object entry is not a directory")
+    for folder in (directory, directory / "shared", directory / "originals", directory / "previews"):
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        with os.scandir(folder) as entries:
+            for count, entry in enumerate(entries):
+                if count >= 1024:
+                    return ArchiveProblem(object_id, "object exceeds scan entry limit")
+                if sync_artifact(entry.name):
+                    return ArchiveProblem(object_id, f"synchronization incomplete: {entry.name}")
     metadata_path = directory / "metadata.json"
     try:
         if metadata_path.is_symlink():
@@ -141,13 +162,16 @@ def _scan_object(directory: Path, small_file_threshold_bytes: int,
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return ArchiveProblem(object_id, "metadata.json is not a regular file")
-            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            with os.fdopen(descriptor, "rb") as stream:
                 descriptor = -1
-                data = json.load(stream)
+                payload = stream.read(MAX_METADATA_BYTES + 1)
+                if len(payload) > MAX_METADATA_BYTES:
+                    return ArchiveProblem(object_id, "metadata.json exceeds scan limit")
+                data = json.loads(payload.decode("utf-8"))
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         return ArchiveProblem(object_id, f"cannot read metadata.json: {error}")
 
     validation_error = _validate_metadata(data, object_id)
@@ -247,11 +271,11 @@ def _validate_expected_preview(directory: Path, original: Path, metadata: dict[s
         if info is None or info.video.get("codec_name") != "h264":
             return "video preview is not a decodable H.264 video"
         decoded = subprocess.run(
-            [ffmpeg, "-hide_banner", "-v", "error", "-i", str(preview), "-f", "null", "-"],
-            capture_output=True, text=True, check=False,
+            [ffmpeg, "-hide_banner", "-nostdin", "-xerror", "-v", "error", "-i", str(preview), "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=1800,
         )
         if decoded.returncode != 0:
-            return f"video preview cannot be decoded: {decoded.stderr[-1000:]}"
+            return f"video preview cannot be decoded (FFmpeg exit {decoded.returncode})"
     except (OSError, ValueError) as error:
         return f"cannot validate video preview: {error}"
     return None
@@ -284,6 +308,14 @@ def scan_archive(archive: str | Path, *, objects_directory: str | Path = "object
                  small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes,
                  tools: ToolsConfig | None = None) -> ScanReport:
     """Validate UUID object directories without modifying the archive."""
+    with vault_import_lock(archive):
+        return _scan_locked(archive, objects_directory=objects_directory,
+                            small_file_threshold_bytes=small_file_threshold_bytes, tools=tools)
+
+
+def _scan_locked(archive: str | Path, *, objects_directory: str | Path = "objects",
+                 small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes,
+                 tools: ToolsConfig | None = None) -> ScanReport:
     resolved_tools = tools or DEFAULT_CONFIG.tools
     root = Path(archive)
     if root.is_symlink():
@@ -300,10 +332,18 @@ def scan_archive(archive: str | Path, *, objects_directory: str | Path = "object
     valid: list[ArchiveObject] = []
     problems: list[ArchiveProblem] = []
     try:
-        entries = sorted(objects_dir.iterdir(), key=lambda entry: entry.name)
-    except OSError as error:
+        with os.scandir(root) as root_entries:
+            for entry in root_entries:
+                if sync_artifact(entry.name):
+                    problems.append(ArchiveProblem("archive", f"synchronization incomplete: {entry.name}"))
+        with os.scandir(objects_dir) as stream:
+            entries = sorted(Path(item.path) for item in islice(stream, MAX_OBJECTS + 1))
+        if len(entries) > MAX_OBJECTS:
+            return ScanReport((), (ArchiveProblem("objects", "archive exceeds scan entry limit"),))
+    except (OSError, MemoryError) as error:
         return ScanReport((), (ArchiveProblem("objects", f"cannot scan objects directory: {error}"),))
 
+    remaining = MAX_SCAN_METADATA_BYTES
     for entry in entries:
         if entry.name.startswith(".incomplete-"):
             problems.append(ArchiveProblem(entry.name, "abandoned importer temporary directory; investigate manually"))
@@ -316,19 +356,56 @@ def scan_archive(archive: str | Path, *, objects_directory: str | Path = "object
             problems.append(ArchiveProblem(entry.name, "unfinished vault import transaction; rerun import to recover"))
             continue
         try:
+            metadata = entry / "metadata.json"
+            if not entry.is_symlink() and not metadata.is_symlink() and metadata.is_file():
+                remaining -= metadata.stat().st_size
+                if remaining < 0:
+                    problems.append(ArchiveProblem(entry.name, "cumulative metadata scan limit reached"))
+                    break
             parsed_id = uuid.UUID(entry.name)
+        except OSError as error:
+            problems.append(ArchiveProblem(entry.name, f"metadata inspection incomplete: {error}"))
+            continue
         except ValueError:
+            problems.append(ArchiveProblem(entry.name, "unexpected entry in objects directory"))
             continue
         if entry.name != str(parsed_id):
             problems.append(ArchiveProblem(entry.name, "object directory name must use canonical lowercase UUID syntax"))
             continue
-        result = _scan_object(entry, small_file_threshold_bytes, resolved_tools)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                result = _scan_object(entry, small_file_threshold_bytes, resolved_tools)
+        except (OSError, ValueError, MemoryError, Image.DecompressionBombError, Image.DecompressionBombWarning,
+                RuntimeError, subprocess.TimeoutExpired) as error:
+            result = ArchiveProblem(entry.name, f"verification incomplete ({type(error).__name__}): {error}")
         if isinstance(result, ArchiveProblem):
             problems.append(result)
         else:
             original_relative = result.metadata.get("original_path", result.metadata["original_filename"])
             relative_path = (objects_relative / entry.name / original_relative).as_posix()
             valid.append(ArchiveObject(result.metadata, relative_path))
+    index = root / "index.json"
+    if not problems and not index.is_symlink() and index.is_file():
+        try:
+            with index.open("rb") as stream:
+                raw = stream.read(MAX_SCAN_METADATA_BYTES + 1)
+            if len(raw) > MAX_SCAN_METADATA_BYTES:
+                problems.append(ArchiveProblem("index", "index comparison exceeds scan limit"))
+            else:
+                try:
+                    prior = json.loads(raw)
+                except (ValueError, UnicodeError):
+                    prior = None  # A malformed disposable index can be rebuilt.
+                observed = {obj.metadata["id"] for obj in valid}
+                if isinstance(prior, dict) and isinstance(prior.get("objects"), list):
+                    for item in prior["objects"]:
+                        info = item.get("metadata") if isinstance(item, dict) else None
+                        if isinstance(info, dict) and isinstance(info.get("id"), str) and info["id"] not in observed:
+                            problems.append(ArchiveProblem(info["id"], "indexed object unavailable; check synchronization"))
+                            break
+        except (OSError, RecursionError, MemoryError) as error:
+            problems.append(ArchiveProblem("index", f"index comparison incomplete: {error}"))
     return ScanReport(tuple(valid), tuple(problems))
 
 
@@ -336,8 +413,20 @@ def rebuild_index(archive: str | Path, *, objects_directory: str | Path = "objec
                   small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes,
                   tools: ToolsConfig | None = None) -> ScanReport:
     """Rebuild the disposable JSON index, refusing replacement on bad objects."""
+    with vault_import_lock(archive):
+        return _rebuild_locked(archive, objects_directory=objects_directory,
+                               small_file_threshold_bytes=small_file_threshold_bytes, tools=tools)
+
+
+def _rebuild_locked(archive: str | Path, *, objects_directory: str | Path = "objects",
+                  small_file_threshold_bytes: int = DEFAULT_CONFIG.general.small_file_threshold_bytes,
+                  tools: ToolsConfig | None = None) -> ScanReport:
     root = Path(archive)
-    report = scan_archive(root, objects_directory=objects_directory,
+    index_path = root / "index.json"
+    if index_path.is_symlink():
+        raise ArchiveError("index.json is a symbolic link")
+    snapshot = _hash_file(index_path) if index_path.exists() else None
+    report = _scan_locked(root, objects_directory=objects_directory,
                           small_file_threshold_bytes=small_file_threshold_bytes,
                           tools=tools)
     if report.problems:
@@ -366,6 +455,9 @@ def rebuild_index(archive: str | Path, *, objects_directory: str | Path = "objec
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        current = _hash_file(index_path) if index_path.exists() else None
+        if current != snapshot or index_path.is_symlink():
+            raise ArchiveError("index.json changed during verification")
         os.replace(temporary_path, index_path)
         temporary_path = None
     finally:

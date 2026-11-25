@@ -54,6 +54,37 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(report.objects[0].relative_path, f"objects/{directory.name}/original.multi.part.bin")
         self.assertEqual(report.problems, ())
 
+    def test_resource_limits_retain_existing_index(self):
+        directory, _ = self.add_object()
+        index = self.archive / "index.json"
+        index.write_bytes(b"previous")
+        with mock.patch("madobsidian.archive.MAX_METADATA_BYTES", 8):
+            report = rebuild_index(self.archive)
+            self.assertFalse(report.complete)
+            self.assertIn("scan limit", str(report.problems[0]))
+        with mock.patch("madobsidian.archive._hash_file", side_effect=lambda path: (
+            "index" if path == index else self._out_of_memory()
+        )):
+            report = rebuild_index(self.archive)
+            self.assertIn("MemoryError", str(report.problems[0]))
+        self.assertTrue(directory.exists())
+        self.assertEqual(index.read_bytes(), b"previous")
+
+    @staticmethod
+    def _out_of_memory():
+        raise MemoryError("simulated exhaustion")
+
+    def test_missing_indexed_object_blocks_rebuild(self):
+        directory, _ = self.add_object()
+        self.assertTrue(rebuild_index(self.archive).complete)
+        index = self.archive / "index.json"
+        before = index.read_bytes()
+        directory.rename(self.root / "offline-object")
+        report = rebuild_index(self.archive)
+        self.assertFalse(report.complete)
+        self.assertIn("indexed object unavailable", str(report.problems[0]))
+        self.assertEqual(index.read_bytes(), before)
+
     def test_cli_verify_is_read_only(self) -> None:
         self.add_object()
         index = self.archive / "index.json"
@@ -111,7 +142,9 @@ class ArchiveTests(unittest.TestCase):
         invalid_dir.mkdir()
         report = scan_archive(self.archive)
         self.assertEqual(len(report.objects), 0)
-        self.assertEqual(len(report.problems), 2)
+        self.assertEqual(len(report.problems), 3)
+        self.assertFalse(report.complete)
+        self.assertTrue(any(p.object_id == invalid_dir.name for p in report.problems))
         self.assertTrue(any("not a valid UUID" in p.reason for p in report.problems))
         self.assertTrue(any("does not match" in p.reason for p in report.problems))
         self.assertTrue(wrong_id_dir.exists())
