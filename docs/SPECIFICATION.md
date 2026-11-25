@@ -209,6 +209,7 @@ Verified in `src/madobsidian/config.py` and `config.example.ini`.
 
 - `MADOBSIDIAN_FFMPEG`: Path or `PATH`-resolvable executable name for `ffmpeg` (default: `ffmpeg`).
 - `MADOBSIDIAN_FFPROBE`: Path or `PATH`-resolvable executable name for `ffprobe` (default: `ffprobe`).
+- **Planned for next release (`0.2.2`, not yet implemented):** Optional `ffmpeg` and `ffprobe` executable path settings in `config.ini` (portable `auto` default in `config.example.ini`, relative path resolution from `config_path.parent`, defined precedence with `MADOBSIDIAN_FFMPEG`/`MADOBSIDIAN_FFPROBE` and `PATH`, and wiring through `import`, `verify`, and `rebuild-index`). See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ---
 
@@ -382,4 +383,3 @@ Verified in `src/madobsidian/archive.py`:
 | `madObsidian status` | Application/archive status command. | Static stub printing `ready (no archive configured)`. | `cli.py:44-46` |
 | Dry-run summary count | Count of files that would be imported. | Includes pending `recovery_rows` in `len(rows)` during `--dry-run`. | `importer.py:883-885`, `cli.py:55` |
 | Non-UUID dirs in `objects/` | Should be detected and reported. | Silently skipped during `scan_archive`. | `archive.py:314-317` |
-| `tests/test_config.py` mock | Config CLI forwarding test should pass. | Statically observed broken mock (`return_value=[]` lacks `.skipped`/`.ignored`/`.failures`). | `tests/test_config.py:139` |

@@ -15,6 +15,7 @@ from madobsidian.config import (
     load_config,
 )
 from madobsidian.cli import main
+from madobsidian.importer import ImportBatchResult
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "config.example.ini"
@@ -136,7 +137,7 @@ class ConfigTests(unittest.TestCase):
             (root / "Incoming").mkdir()
             config_path = root / "config.ini"
             config_path.write_text("[general]\nincoming_directory = Incoming\n", encoding="utf-8")
-            with mock.patch("madobsidian.cli.import_vault", return_value=[]) as importer:
+            with mock.patch("madobsidian.cli.import_vault", return_value=ImportBatchResult()) as importer:
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(main(["import", str(root), "--dry-run", "--config", str(config_path)]), 0)
             self.assertEqual(importer.call_args.kwargs["config"].config_path, config_path.resolve())

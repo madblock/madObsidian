@@ -136,9 +136,8 @@ This document records the key architectural decisions in **madObsidian**, their 
 ## ADR-010: Separation of Agent Operating Rules (`AGENTS.md`) from Engineering Documentation (`docs/`)
 
 - **Status:** Accepted and adopted in documentation structure
-- **Evidence:** Local `AGENTS.md` (untracked, updated to keep only enduring operational constraints) + documentation workflow.
+- **Evidence:** `AGENTS.md` (tracked in repository, focused on enduring operational constraints) + documentation workflow.
 - **Context:** Combining operational rules for AI coding agents (Git safety, approval gates, tool boundaries) with product specifications and design history makes both harder to maintain and risks stale product statements inside agent rules.
-- **Decision:** Keep `AGENTS.md` focused strictly on durable operational rules and safety conventions for coding agents (how to work safely in the repo), while keeping product behavior, design rationale, current state, quality gates, and roadmap in `docs/` and `CHANGELOG.md`.
+- **Decision:** Keep `AGENTS.md` focused strictly on durable operational rules and safety conventions for coding agents (how to work safely in the repo, including keeping docs synchronized with code/test changes), while keeping product behavior, design rationale, current state, quality gates, and roadmap in `docs/` and `CHANGELOG.md`.
 - **Consequences:**
-  - Product evolution updates `docs/` and `CHANGELOG.md` without conflating specifications with agent guardrails.
-  - Local `AGENTS.md` has been aligned with this boundary and remains untracked locally.
+  - Product evolution updates `docs/` and `CHANGELOG.md` automatically alongside code/test changes without conflating specifications with agent guardrails.

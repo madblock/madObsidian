@@ -36,6 +36,7 @@
 
 - Prefer focused changes over broad rewrites.
 - Add or update tests when behavior changes.
+- Automatically update affected project documentation (`docs/`, `CHANGELOG.md`, and `README.md` when user-facing behavior changes) whenever code or tests change, even if not explicitly requested.
 - Run the narrowest relevant tests first, followed by the broader test suite when appropriate.
 - Report the exact commands executed and their results.
 - Distinguish tests actually executed from tests merely recommended.

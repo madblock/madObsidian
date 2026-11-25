@@ -21,7 +21,7 @@ The workflow is intentionally lightweight — enough structure to preserve data 
 | [PROGRESS.md](PROGRESS.md) | Current status, test inventory, known bugs, tech debt, open questions. | Fixing known issues, discovering new bugs, completing milestones. |
 | [ACCEPTANCE_CRITERIA.md](ACCEPTANCE_CRITERIA.md) | Project-wide invariants and verification gates. | New invariant introduced or existing guarantee refined. |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Workflow + prioritized roadmap of upcoming workstreams. | Completing roadmap items or re-prioritizing work. |
-| `AGENTS.md` *(local)* | Operational guardrails for AI coding agents (Git safety, approvals, boundaries). | Only when agent operating rules change — keep product specs out of `AGENTS.md`. |
+| [AGENTS.md](../AGENTS.md) | Operational guardrails for AI coding agents (Git safety, approvals, boundaries, auto-doc-sync). | Only when agent operating rules change — keep product specs out of `AGENTS.md`. |
 
 ### 1.2 Change Lifecycle
 
@@ -55,17 +55,18 @@ Items below are **planned or proposed workstreams**, not completed features. Non
 
 High-value, low-risk fixes addressing concrete bugs and inconsistencies identified during the `0.2.1` audit:
 
-1. **Fix `tests/test_config.py::test_vault_cli_config_option_is_forwarded`**
-   - Return an `ImportBatchResult()` (instead of `[]`) from the mocked `import_vault` so the full test suite passes cleanly.
-   - Run and verify the entire 12-module `unittest discover -s tests -v` suite.
-2. **Add regression test for pre-hashing read failure exclusions**
+1. **Add regression test for pre-hashing read failure exclusions**
    - Add a focused test in `tests/test_exclusions.py` verifying that an `OSError` during `_sha256` leaves the `Incoming/` file and Markdown links untouched, reports a non-serious failure, and records the filename in `exclusions.ini` `[ignore]`.
-3. **Clarify or fix `--dry-run` summary count (`importer.py:883-885`, `cli.py:55`)**
+2. **Clarify or fix `--dry-run` summary count (`importer.py:883-885`, `cli.py:55`)**
    - Separate pending recovery counts from planned new import counts in CLI summary output so dry-run reports accurately instead of conflating both under `"Would import N file(s)"`.
+3. **Add configurable `ffmpeg` and `ffprobe` executable paths to `config.ini` (`config.py`, `video_previews.py`, `archive.py`, `cli.py`, `config.example.ini`)**
+   - Allow optional machine-local `ffmpeg` and `ffprobe` executable paths in `config.ini` (default `auto` in `config.example.ini` to keep the example portable; resolve relative paths from `config_path.parent`, matching `[watermark] font`).
+   - Define and test explicit precedence between `MADOBSIDIAN_FFMPEG`/`MADOBSIDIAN_FFPROBE`, `config.ini` settings, and `PATH`, and fail closed on invalid configured paths.
+   - Thread configured tool paths through both `importer.py` → `video_previews.py` and `cli.py` → `archive.py` (`verify` and `rebuild-index`), not only preview generation.
 4. **Decide custom font validation behavior when `watermark.enabled = false` (`config.py:172-183`)**
    - Either skip custom font existence/Pillow loading when watermarking is disabled, or explicitly confirm and document unconditional startup validation with a dedicated test case.
 5. **Standardize release hygiene & Git tagging**
-   - Enforce a single-commit release checklist (version parity across `pyproject.toml`, `src/madobsidian/__init__.py`, and `tests/test_cli.py`, full 12-module test run, `git diff --check`) and create annotated Git tags (`vX.Y.Z`) for future releases (optionally deciding whether to tag `0.2.1` retroactively and whether to track local `AGENTS.md`).
+   - Enforce a single-commit release checklist (version parity across `pyproject.toml`, `src/madobsidian/__init__.py`, and `tests/test_cli.py`, full 12-module test run, `git diff --check`) and create annotated Git tags (`vX.Y.Z`) for future releases (optionally tagging `0.2.1` retroactively).
 
 ### Phase 2: Robustness & Cross-Platform Hardening (`0.3.x` candidates)
 

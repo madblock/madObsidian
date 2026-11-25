@@ -6,6 +6,10 @@ History prior to the creation of this changelog is reconstructed strictly from G
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stale `return_value=[]` mock in `tests/test_config.py::ConfigTests::test_vault_cli_config_option_is_forwarded` to return `ImportBatchResult()`, restoring full 12-module test suite execution.
+
 ### Documentation
 
 - Established durable engineering documentation in `docs/` (`SPECIFICATION.md`, `DECISIONS.md`, `PROGRESS.md`, `ACCEPTANCE_CRITERIA.md`, `IMPLEMENTATION_PLAN.md`) and added `CHANGELOG.md`.

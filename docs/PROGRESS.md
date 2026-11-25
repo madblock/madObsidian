@@ -1,7 +1,7 @@
 # Project Progress and Current State
 
-**Current version:** `0.2.1` (HEAD: `06e76c3`, branch `master`, synced with `origin/master`).
-**Last audited:** 2026-11-24 (static code, test, and Git history audit; no tests executed during this documentation pass).
+**Current version:** `0.2.1` (branch `master`).
+**Last audited:** 2026-11-25 (full 12-module test suite executed with `PYTHONPATH=src` and FFmpeg/ffprobe configured: **156/156 passing**).
 
 This document tracks what is implemented, what is verified by tests, known bugs and discrepancies, technical debt, deferred work, and open questions.
 
@@ -18,7 +18,7 @@ This document tracks what is implemented, what is verified by tests, known bugs 
 | Persistent failed-import exclusions (`exclusions.ini` `[ignore]`) | Implemented (`0.2.1`) | `exclusions.py`, `importer.py`, `cli.py` | `tests/test_exclusions.py`, `tests/test_import_failures.py` |
 | Cross-platform per-vault & exclusions file locking | Implemented (`0.2.1`) | `locking.py`, `importer.py`, `exclusions.py` | `tests/test_import_locking.py`, `tests/test_exclusions.py` |
 | Obsidian wikilink/embed rewriting + `madobsidian://<UUID>` | Implemented | `importer.py` | `tests/test_vault_import.py` |
-| Strict INI configuration (`config.ini` + `config.example.ini`) | Implemented | `config.py` | `tests/test_config.py` *(see Known Issue #1)* |
+| Strict INI configuration (`config.ini` + `config.example.ini`) | Implemented | `config.py` | `tests/test_config.py` |
 | Watermarked WebP image previews (Pillow + bundled DejaVu Sans) | Implemented | `previews.py`, `assets/` | `tests/test_previews.py` |
 | Full-length VFR-preserving H.264/AAC MP4 video previews | Implemented | `video_previews.py` | `tests/test_video_previews.py`, `tests/test_media_eligibility.py`, `tests/test_watermark_wrap.py` |
 | Archive verification (`verify`) & disposable `index.json` rebuild | Implemented | `archive.py`, `cli.py` | `tests/test_archive.py` |
@@ -33,7 +33,7 @@ The repository uses Python's standard `unittest` framework across **12 test modu
 
 - `tests/test_archive.py` — Archive scanning, metadata/symlink/preview validation, `rebuild-index` atomicity.
 - `tests/test_cli.py` — `--version`, `status`, `--help`, absence of obsolete `failed-imports`, legacy import & `--dry-run` rejection.
-- `tests/test_config.py` — INI loading, validation, defaults, relative fonts, CLI `--config` forwarding *(contains Known Issue #1)*.
+- `tests/test_config.py` — INI loading, validation, defaults, relative fonts, CLI `--config` forwarding.
 - `tests/test_exclusions.py` — `exclusions.ini` format, validation, atomic/concurrent updates, pre-transaction failures, dry-run isolation.
 - `tests/test_import_failures.py` — Per-file rollback, continuation, exclusions after failure, CLI exit codes & ignored output.
 - `tests/test_import_locking.py` — Lock path stability and multi-process vault import serialization.
@@ -44,24 +44,21 @@ The repository uses Python's standard `unittest` framework across **12 test modu
 - `tests/test_video_previews.py` — Real FFmpeg/ffprobe integration tests (CFR, silent, VFR, delayed audio, rotation, failure cleanup; skips if FFmpeg/`libx264`/`ffprobe` unavailable).
 - `tests/test_watermark_wrap.py` — Multiline Cyrillic wrapping across Pillow layout engines (RAQM/BASIC).
 
-**Verification note:** During the `0.2.1` release, only the 5 focused modules (`test_exclusions`, `test_import_locking`, `test_import_failures`, `test_vault_import`, `test_cli` — 73 tests) were executed. The full `unittest discover -s tests` suite has not been executed in this documentation-only pass.
+**Verification note (2026-11-25):** All **156 test methods** across the 12 modules pass after fixing the stale `ImportBatchResult()` mock in `tests/test_config.py`: `146` passed via `$env:PYTHONPATH='src'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v` (with `VideoPreviewTests` skipped when FFmpeg env vars are unset) and all `10` integration tests in `tests/test_video_previews.py` passed with `MADOBSIDIAN_FFMPEG` and `MADOBSIDIAN_FFPROBE` configured. Note that local `.venv` currently has a stale editable install pointing to `H:\madObsidian\src`, so `PYTHONPATH=src` is needed until `.venv` is reinstalled with `pip install -e .`.
 
 ---
 
 ## 3. Known Bugs, Discrepancies, and Immediate Issues
 
-1. **Broken mock in `tests/test_config.py` (statically verified bug):**
-   - `tests/test_config.py:139` (`test_vault_cli_config_option_is_forwarded`) patches `madobsidian.cli.import_vault` with `return_value=[]` (a plain `list`).
-   - `src/madobsidian/cli.py:55-57` accesses `rows.skipped`, `rows.ignored`, and `rows.failures`, which exist on `ImportBatchResult` but not on `list` — causing an unhandled `AttributeError`.
-   - Likely introduced in `27055dd` when `ImportBatchResult` was added, and missed because `test_config.py` was not in the focused 5-module test command.
-2. **CLI `status` is a static placeholder (`src/madobsidian/cli.py:44-46`):**
+1. **CLI `status` is a static placeholder (`src/madobsidian/cli.py:44-46`):**
    - Prints `madObsidian 0.2.1: ready (no archive configured)` without inspecting any vault, config, or pending transactions.
-3. **Dry-run summary count conflates recovery rows and planned imports (`src/madobsidian/importer.py:883-885`, `cli.py:55`):**
+2. **Dry-run summary count conflates recovery rows and planned imports (`src/madobsidian/importer.py:883-885`, `cli.py:55`):**
    - During `--dry-run`, pending recovery rows are appended to `batch`, inflating `"Would import N file(s)"`.
-4. **Git release hygiene:**
+3. **Git & local environment hygiene:**
    - No Git tags exist for `0.1.0`, `0.2.0`, or `0.2.1`.
    - Release `0.2.1` was split across two commits (`53d1fd6` and `06e76c3`).
-   - Untracked local artifacts remain in the working tree (`AGENTS.md`, `pi-test-config.ini`, `test.py`; note these are user-owned and must be preserved).
+   - Local `.venv` editable install points to `H:\madObsidian\src` instead of `H:\Python\madObsidian\src` (requiring `PYTHONPATH=src` until `pip install -e .` is rerun).
+   - Untracked local artifacts remain in the working tree (`pi-test-config.ini`, `test.py`; user-owned and must be preserved).
 
 ---
 
@@ -94,8 +91,8 @@ Captured from codebase inspection and the previous `README.md` TODO list:
 
 ### Unresolved Design Questions
 
-1. **Shared `exclusions.ini` across multiple vaults:** When multiple vaults pass the same `--config`, `exclusions.ini` is shared beside `config.ini`, so an ignored basename in Vault A is also ignored in Vault B. Is per-config sharing intentional, or should exclusions be vault-scoped?
-2. **Ambiguous basename Unicode candidates:** Currently, if two NFC-equivalent files in `Incoming/` trigger an ambiguity on a basename-only link, the link is left unrewritten *while both files are still moved into `objects/`* (`test_vault_import.py:155-179`). Should this remain the intended behavior?
-3. **Custom font validation when `watermark.enabled = false`:** Should `load_config` still fail on missing custom fonts when watermarking is disabled, or skip font loading?
-4. **Tracking `AGENTS.md`:** Should `AGENTS.md` remain a local untracked file, or be committed to the repository?
+1. **Configurable `ffmpeg` / `ffprobe` paths in `config.ini` (planned for `0.2.2`):** Should optional tool paths live under `[videos]` (e.g., `ffmpeg_path = auto`, `ffprobe_path = auto`) or a dedicated `[tools]` section, and should environment variables (`MADOBSIDIAN_FFMPEG`/`MADOBSIDIAN_FFPROBE`) override `config.ini` or vice versa?
+2. **Shared `exclusions.ini` across multiple vaults:** When multiple vaults pass the same `--config`, `exclusions.ini` is shared beside `config.ini`, so an ignored basename in Vault A is also ignored in Vault B. Is per-config sharing intentional, or should exclusions be vault-scoped?
+3. **Ambiguous basename Unicode candidates:** Currently, if two NFC-equivalent files in `Incoming/` trigger an ambiguity on a basename-only link, the link is left unrewritten *while both files are still moved into `objects/`* (`test_vault_import.py:155-179`). Should this remain the intended behavior?
+4. **Custom font validation when `watermark.enabled = false`:** Should `load_config` still fail on missing custom fonts when watermarking is disabled, or skip font loading?
 5. **Future of `madObsidian status` and legacy `import_path`:** Should `status` inspect a vault/config (reporting pending transactions, ignored count, lock state), or remain minimal? Is legacy two-path `import_path` permanently supported or slated for deprecation?
