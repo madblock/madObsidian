@@ -6,6 +6,8 @@ History prior to the creation of this changelog is reconstructed strictly from G
 
 ## [Unreleased]
 
+- Journal object preparation, Markdown completion and rollback progress. Standalone recovery now serializes with vault imports.
+
 ## [0.2.2] - 2026-11-25
 
 *Prepared release candidate on `master` (not yet committed or tagged; annotated `v0.2.2` tag planned on final release commit).*

@@ -164,7 +164,7 @@ Written atomically via `_write_journal` (`importer.py:242-253`) and strictly val
 | `sha256` | `str` | Lowercase 64-char hex SHA-256 of source file. |
 | `size_bytes` | `int` | Non-negative integer file size. |
 | `markdown` | `dict[str, list[dict]]` | Map of vault-relative `.md` POSIX paths to lists of `{"old": str, "new": str, "count": int}` (`count >= 1`). |
-| `phase` | `str` | State machine value: `"moving"`, `"moved"`, or `"published"`. |
+| `phase` | `str` | `moving`, `moved`, `prepared` (metadata complete), `published`, `completed`, `rolling_back`, or `rolled_back`. Publication occurs when the staging directory is renamed to its UUID. A `prepared` journal in a UUID directory rolls forward. |
 | `source_mode` | `str` | Must equal `"move"`. Legacy copy-mode journals without `"source_mode": "move"` are rejected. |
 
 ### 3.6 `import.log` Format

@@ -7,6 +7,10 @@ This document tracks what is implemented, what is verified by tests, known bugs 
 
 ---
 
+## Phase 2 transaction checkpoint
+
+The subprocess crash suite covers source verification, stage and layout creation, temporary and replaced journals, source move, preview completion, metadata write, directory publication, Markdown replacement, finalization and journal removal. Rollback cases interrupt source restoration, staged-original unlink, cleanup and journal removal. Each case checks the surviving media and repeats recovery in a fresh process. The import does not write the disposable index. Physical power loss and Raspberry Pi durability remain unverified.
+
 ## 1. Implemented Functionality
 
 | Capability | Status | Primary Modules | Verification / Tests |

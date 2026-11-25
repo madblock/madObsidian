@@ -73,7 +73,7 @@ All five Phase 1 workstreams have been implemented and verified in the working t
 
 ### Phase 2: Robustness & Cross-Platform Hardening (`0.3.x` candidates)
 
-Ordered by priority, derived from codebase inspection and the former `README.md` TODO backlog:
+Phase 2 is authorized for `develop`. The initial checkpoint covers standalone recovery coordination, publication and rollback phases, and subprocess interruption tests. Later items remain open until verified.
 
 1. **`[Hardening]` Transaction journal & power-loss hardening (`importer.py`, `archive.py`, `exclusions.py`)**
    - Strengthen semantic validation of `transaction.json` and constrain recovery filesystem changes further.

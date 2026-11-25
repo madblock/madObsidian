@@ -13,6 +13,8 @@
 - Explain the reason for any proposed dependency addition before introducing it.
 - Never commit, push, reset, clean, or rewrite Git history without explicit permission.
 
+Phase 2 development uses `develop`. The branch authorization includes tested checkpoints on `origin/develop`. Integration into `master`, tagging, releases and deployment require separate authorization.
+
 ## 2. Protect existing work
 
 - Inspect `git status` before making changes.

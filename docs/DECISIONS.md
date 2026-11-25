@@ -74,6 +74,8 @@ This document records the key architectural decisions in **madObsidian**, their 
 
 ---
 
+Recovery takes the same local vault lock as import. The directory rename decides whether to restore the source or finish the published object. Rollback keeps its journal until the source verifies and stage payload cleanup finishes.
+
 ## ADR-006: Full-Length VFR-Preserving H.264/AAC Video Previews and WebP Image Previews with Bundled Font
 
 - **Status:** Accepted and implemented (`0.1.0`, commits `6327e70`, `6e48ec4`; configurable in `0.2.0`, `00269a7`)

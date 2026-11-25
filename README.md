@@ -63,6 +63,8 @@ See [docs/SPECIFICATION.md](docs/SPECIFICATION.md) for full configuration rules,
 
 ## Multi-Device Syncthing Deployment
 
+Run imports on one device at a time and wait for synchronization to finish before switching devices. The vault lock coordinates local processes only. If recovery reports a conflict, pause imports, preserve the entire stage or UUID directory and its journal, and compare the original and note contents before resolving the conflict.
+
 Add `objects/.incomplete-*` to `.stignore` on **every** synchronized device (including Windows and Raspberry Pi) so unpublished staging directories are never synced.
 
 On lightweight devices (VPS, Android), use these local `.stignore` rules to keep metadata, previews, and small `shared/` files while excluding `Incoming/` and large `originals/`:

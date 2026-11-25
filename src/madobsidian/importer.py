@@ -56,6 +56,19 @@ class ImportError(Exception):
     """Raised when an item cannot be safely imported."""
 
 
+def _checkpoint(name: str) -> None:
+    """Observation point for subprocess crash tests."""
+
+
+def _sync_directory(directory: Path) -> None:
+    if os.name == "posix":
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
 def _media_kind(filename: str) -> str | None:
     suffix = Path(filename).suffix.casefold()
     if suffix in REGISTERED_IMAGE_EXTENSIONS:
@@ -118,6 +131,7 @@ def _import_file(source: Path, objects: Path, *, layout: bool = False, identifie
         raise ImportError(invalid_filename)
     source_hash = _sha256(source)
     source_size = source.stat().st_size
+    _checkpoint("source_verified")
     if transaction is not None and (
         transaction.get("sha256") not in (None, source_hash)
         or transaction.get("size_bytes") not in (None, source_size)
@@ -129,9 +143,13 @@ def _import_file(source: Path, objects: Path, *, layout: bool = False, identifie
         identifier = identifier or uuid.uuid4()
         final_dir = objects / str(identifier)
         if final_dir.exists():
+            if transaction is not None:
+                raise ImportError(f"Planned object identifier is already in use: {identifier}")
             identifier = None
             continue
         temporary_dir = Path(tempfile.mkdtemp(prefix=".incomplete-", dir=objects))
+        _sync_directory(objects)
+        _checkpoint("stage_created")
         move_attempted = False
         safe_cleanup_after_move_failure = False
         try:
@@ -139,6 +157,7 @@ def _import_file(source: Path, objects: Path, *, layout: bool = False, identifie
             target = temporary_dir / relative_original / source.name
             if relative_original:
                 target.parent.mkdir()
+                _checkpoint("layout_created")
             move_source = transaction is not None and layout
             if move_source:
                 transaction.update({"id": str(identifier), "sha256": source_hash, "size_bytes": source_size,
@@ -148,6 +167,9 @@ def _import_file(source: Path, objects: Path, *, layout: bool = False, identifie
                 move_attempted = True
                 try:
                     source.rename(target)
+                    _sync_directory(target.parent)
+                    _sync_directory(source.parent)
+                    _checkpoint("source_moved")
                 except OSError:
                     try:
                         source_intact = (
@@ -189,6 +211,7 @@ def _import_file(source: Path, objects: Path, *, layout: bool = False, identifie
                     raise ImportError(f"Eligible video did not produce a preview: {source.name}")
             if move_source and (target.stat().st_size != source_size or _sha256(target) != source_hash):
                 raise ImportError(f"Moved original changed during preview processing; preserved at {target}")
+            _checkpoint("preview_finished")
             metadata = _metadata(source, identifier, source_hash, source_size, layout=layout,
                                  threshold=config.general.small_file_threshold_bytes)
             with (temporary_dir / "metadata.json").open("x", encoding="utf-8") as stream:
@@ -196,11 +219,14 @@ def _import_file(source: Path, objects: Path, *, layout: bool = False, identifie
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+            _checkpoint("metadata_written")
             if transaction is not None:
-                transaction["phase"] = "published"
+                transaction["phase"] = "prepared"
                 _write_journal(temporary_dir / "transaction.json", transaction)
             try:
                 temporary_dir.rename(final_dir)
+                _sync_directory(objects)
+                _checkpoint("object_published")
             except FileExistsError:
                 if move_source:
                     raise ImportError(f"Object UUID appeared during publication; original preserved at {target}")
@@ -251,7 +277,10 @@ def _write_journal(path: Path, data: dict[str, object]) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        _checkpoint("journal_temp_" + str(data["phase"]))
         os.replace(temporary, path)
+        _sync_directory(path.parent)
+        _checkpoint("journal_" + str(data["phase"]))
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -398,6 +427,7 @@ def _atomic_text(path: Path, value: str) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _sync_directory(path.parent)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -449,7 +479,9 @@ def _read_transaction(manifest: Path, vault: Path, object_dir: Path, incoming_di
         raise ImportError("Transaction journal has an invalid UUID") from error
     if parsed_id.version != 4 or str(parsed_id) != data["id"] or object_dir.name != str(parsed_id) and not object_dir.name.startswith(".incomplete-"):
         raise ImportError("Transaction journal UUID does not match its object")
-    if not isinstance(data["phase"], str) or data["phase"] not in {"moving", "moved", "published"}:
+    if not isinstance(data["phase"], str) or data["phase"] not in {
+        "moving", "moved", "prepared", "published", "completed", "rolling_back", "rolled_back"
+    }:
         raise ImportError("Transaction journal has an invalid phase")
     if (not isinstance(data["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", data["sha256"])
             or isinstance(data["size_bytes"], bool) or not isinstance(data["size_bytes"], int)
@@ -537,7 +569,10 @@ def _restore_moved_staging_original(obj: Path, source: Path, data: dict[str, obj
                 raise ImportError(f"Could not restore staged original to Incoming: {source}") from error
             _check_integrity(source, data)
         _check_integrity(source, data)
+        _sync_directory(source.parent)
+        _checkpoint("source_restored")
         target.unlink()
+        _checkpoint("staged_original_removed")
 
 
 def _cleanup_unjournaled_staging(vault: Path, obj: Path, incoming: Path, *, dry_run: bool) -> dict[str, object]:
@@ -547,6 +582,16 @@ def _cleanup_unjournaled_staging(vault: Path, obj: Path, incoming: Path, *, dry_
         if not dry_run:
             shutil.rmtree(obj)
         return {"id": "unknown", "source": "unknown", "action": action}
+    for child in obj.iterdir():
+        if child.is_symlink():
+            raise ImportError(f"Unverifiable abandoned stage contains a symbolic link: {child}")
+        if child.is_dir():
+            if child.name not in {"shared", "originals"} or any(
+                item.is_symlink() or not item.is_file() for item in child.iterdir()
+            ):
+                raise ImportError(f"Unverifiable abandoned stage contents: {child}")
+        elif child.name == "metadata.json":
+            raise ImportError(f"Abandoned stage contains metadata without a journal: {obj}")
     candidates = [p for p in incoming.iterdir() if not p.is_symlink() and p.is_file()]
     staged_originals = [p for folder in ("shared", "originals") for p in (obj / folder).glob("*") if not p.is_symlink() and p.is_file()]
     staged_originals.extend(
@@ -589,26 +634,46 @@ def _apply_transaction(vault: Path, obj: Path, manifest: Path, data: dict[str, o
             or metadata.get("size_bytes") != data["size_bytes"]
             or metadata.get("sha256") != data["sha256"]):
         raise ImportError(f"Published object metadata does not match its transaction: {metadata_path}")
-    planned: list[tuple[Path, str]] = []
+    planned: list[tuple[Path, str, str]] = []
     for note_rel, edits in data["markdown"].items():
         note = _safe_relative(vault, note_rel, label="Markdown")
         if not note.is_file():
             raise ImportError(f"Markdown recovery conflict; note is missing: {note}")
         with note.open("r", encoding="utf-8", newline="") as stream:
             original_text = stream.read()
-        planned.append((note, _apply_markdown_edits(original_text, edits, note_rel)))
+        planned.append((note, original_text, _apply_markdown_edits(original_text, edits, note_rel)))
     if dry_run:
         return data["id"]
-    for note, updated in planned:
-        _atomic_text(note, updated)
+    if data["phase"] == "prepared":
+        data["phase"] = "published"
+        _write_journal(manifest, data)
+    for note, original, updated in planned:
+        with note.open("r", encoding="utf-8", newline="") as stream:
+            if stream.read() != original:
+                raise ImportError(f"Markdown changed during recovery: {note}")
+        if updated != original:
+            _atomic_text(note, updated)
+            _checkpoint("note_updated")
+    if data["phase"] != "completed":
+        data["phase"] = "completed"
+        _write_journal(manifest, data)
     manifest.unlink()
+    _sync_directory(obj)
+    _checkpoint("journal_removed")
     return data["id"]
 
 
 def recover_transactions(vault: str | Path, *, dry_run: bool = False,
                          config: AppConfig | None = None,
                          only_source: str | None = None) -> tuple[list[dict[str, object]], set[str]]:
-    """Recover published imports or safely discard staging copies while source remains valid."""
+    """Serialize standalone recovery with imports on this vault."""
+    with vault_import_lock(vault):
+        return _recover_locked(vault, dry_run=dry_run, config=config, only_source=only_source)
+
+
+def _recover_locked(vault: str | Path, *, dry_run: bool = False,
+                    config: AppConfig | None = None,
+                    only_source: str | None = None) -> tuple[list[dict[str, object]], set[str]]:
     config = config or DEFAULT_CONFIG
     root = Path(vault).resolve()
     incoming = resolve_vault_directory(root, config.general.incoming_directory)
@@ -670,13 +735,28 @@ def recover_transactions(vault: str | Path, *, dry_run: bool = False,
             if dry_run:
                 covered_sources.add(data["source"])
             else:
+                data["phase"] = "rolling_back"
+                _write_journal(manifest, data)
                 _restore_moved_staging_original(obj, source, data)
-                shutil.rmtree(obj)
+                _check_integrity(source, data)
+                data["phase"] = "rolled_back"
+                _write_journal(manifest, data)
+                for child in obj.iterdir():
+                    if child != manifest:
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink()
+                _checkpoint("stage_payload_removed")
+                manifest.unlink()
+                _checkpoint("rollback_journal_removed")
+                obj.rmdir()
                 action = "restored verified original to Incoming and discarded unpublished stage"
-            completed.append({"id": data["id"], "source": data["source"], "action": action})
+            completed.append({"id": data["id"], "source": data["source"], "action": action,
+                              "state": "pending" if dry_run else "rolled_back"})
         else:
             # Published journals must be UUID directories, and finalization is replayable.
-            if obj.name != data["id"] or data["phase"] != "published":
+            if obj.name != data["id"] or data["phase"] not in {"prepared", "published", "completed"}:
                 raise ImportError(f"Published transaction journal has inconsistent state: {manifest}")
             if dry_run:
                 _apply_transaction(root, obj, manifest, data, dry_run=True)
@@ -685,7 +765,7 @@ def recover_transactions(vault: str | Path, *, dry_run: bool = False,
                 continue
             identifier = _apply_transaction(root, obj, manifest, data)
             completed.append({"id": identifier, "source": data["source"],
-                              "action": "recovered published transaction"})
+                              "action": "recovered published transaction", "state": "completed"})
     return completed, covered_sources
 
 
@@ -762,7 +842,7 @@ def _import_vault_locked(vault: str | Path, *, dry_run: bool = False,
     error_log_path = root.parent / "import.log"
     batch = ImportBatchResult()
     try:
-        recovery_rows, covered_sources = recover_transactions(root, dry_run=dry_run, config=config)
+        recovery_rows, covered_sources = _recover_locked(root, dry_run=dry_run, config=config)
         _reject_pending_transactions_outside(root, objects)
     except Exception as error:
         if not dry_run:
@@ -793,7 +873,7 @@ def _import_vault_locked(vault: str | Path, *, dry_run: bool = False,
         else:
             try:
                 if transaction_started:
-                    recover_transactions(root, config=config, only_source=relative_path)
+                    _recover_locked(root, config=config, only_source=relative_path)
                 restored = (_source_matches(source, size, digest)
                             if digest is not None and size is not None
                             else not transaction_started and _source_present(source, size))
@@ -914,7 +994,7 @@ def _import_vault_locked(vault: str | Path, *, dry_run: bool = False,
             result = _import_file(source, objects, layout=True, identifier=uuid.UUID(identifier), transaction=manifest,
                                   config=config)
             published = True
-            recover_transactions(root, config=config, only_source=source_rel)
+            _recover_locked(root, config=config, only_source=source_rel)
             row["id"] = result.metadata.id
             batch.append(row)
         except Exception as error:

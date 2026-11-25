@@ -37,6 +37,7 @@ For behavioral details, see [SPECIFICATION.md](SPECIFICATION.md). For workflow a
   - Pre-publication interruptions restore the verified original to `Incoming/` (without overwriting an existing different file) and discard `.incomplete-*`.
   - Post-publication interruptions replay pending Markdown edits idempotently and unlink `transaction.json` without creating duplicate objects.
   - Configuration changes (`incoming_directory`, `objects_directory`, `small_file_threshold_bytes`) must fail closed while pending transactions exist.
+  - Kill the importing or recovering process at each durable boundary. Inspect the surviving original and journal, then run recovery in two fresh processes and compare their filesystem results.
 - **AC-3.4 Exclusion safety gates:**
   - Transaction recovery must always run *before* `exclusions.ini` is loaded or applied.
   - An exclusion must **never** be written when rollback failed, when an object was already published, or when the original cannot be confirmed intact at `Incoming/` (size and SHA-256 match after hashing/rollback; untouched file presence via `_source_present` when a read failure occurs before hashing starts so unreadable files and their Markdown links remain untouched and are ignored on subsequent runs).
