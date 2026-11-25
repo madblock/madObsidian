@@ -8,29 +8,30 @@ import json
 import os
 import re
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
-from madobsidian.locking import process_lock
+from madobsidian.locking import process_lock, vault_lock_path
 
 
 class ExclusionsError(OSError):
-    """Raised when exclusions.ini is malformed or cannot be updated safely."""
+    """Raised when the vault exclusions file is malformed or cannot be updated safely."""
 
 
 _KEY = re.compile(r"^[0-9a-f]{64}$")
 
 
-def exclusion_path(config_path: Path | None, vault_root: Path) -> Path:
-    """Resolve exclusions.ini beside the selected config, or beside the vault."""
-    directory = config_path.parent if config_path is not None else vault_root.parent
-    return directory / "exclusions.ini"
+def exclusion_path(vault_root: Path) -> Path:
+    return vault_root / "madobsidian_exclusions.ini"
 
 
 def filename_key(filename: str) -> str:
+    if (PureWindowsPath(filename).is_absolute() or "\\" in filename
+            or any(part in {"", ".", ".."} for part in filename.split("/"))):
+        raise ExclusionsError(f"Invalid Incoming-relative exclusion path: {filename!r}")
     try:
         encoded = filename.encode("utf-8")
     except UnicodeEncodeError as error:
-        raise ExclusionsError("Filename cannot be represented as UTF-8 for exclusions.ini") from error
+        raise ExclusionsError("Filename cannot be represented as UTF-8 for the vault exclusions file") from error
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -43,6 +44,9 @@ def _empty_parser() -> configparser.ConfigParser:
 def _read_parser(path: Path) -> tuple[configparser.ConfigParser, bytes | None]:
     if path.is_symlink():
         raise ExclusionsError(f"Exclusions file is a symbolic link: {path}")
+    conflicts = sorted(path.parent.glob(f"{path.stem}.sync-conflict-*{path.suffix}"))
+    if conflicts:
+        raise ExclusionsError(f"Syncthing conflict requires manual resolution: {conflicts[0]}")
     parser = _empty_parser()
     try:
         snapshot = path.read_bytes() if path.exists() else None
@@ -52,19 +56,21 @@ def _read_parser(path: Path) -> tuple[configparser.ConfigParser, bytes | None]:
         raise ExclusionsError(f"Cannot read exclusions file {path}: {error}") from error
     if parser.defaults():
         raise ExclusionsError(f"Malformed exclusions file {path}: DEFAULT entries are not supported")
-    unknown = set(parser.sections()) - {"ignore"}
-    if unknown:
-        raise ExclusionsError(f"Malformed exclusions file {path}: unsupported section(s): {', '.join(sorted(unknown))}")
     if not parser.has_section("ignore"):
         return parser, snapshot
     for key, raw_value in parser.items("ignore", raw=True):
         if _KEY.fullmatch(key) is None:
             raise ExclusionsError(f"Malformed exclusions file {path}: invalid filename hash key {key!r}")
         try:
-            filename = json.loads(raw_value)
+            entry = json.loads(raw_value)
         except (json.JSONDecodeError, TypeError) as error:
             raise ExclusionsError(f"Malformed exclusions file {path}: value for {key} is not a JSON string") from error
-        if not isinstance(filename, str) or not filename or Path(filename).name != filename:
+        if not isinstance(entry, dict) or not all(
+            isinstance(entry.get(field), str) and entry[field] for field in ("path", "reason", "message")
+        ):
+            raise ExclusionsError(f"Invalid exclusion record in {path}: {key}")
+        filename = entry["path"]
+        if filename.startswith("/") or any(part in {"", ".", ".."} for part in filename.split("/")):
             raise ExclusionsError(f"Malformed exclusions file {path}: value for {key} must be a filename JSON string")
         if filename_key(filename) != key:
             raise ExclusionsError(f"Malformed exclusions file {path}: filename hash does not match value for {key}")
@@ -76,14 +82,15 @@ def load_exclusions(path: Path) -> dict[str, str]:
     parser, _snapshot = _read_parser(path)
     if not parser.has_section("ignore"):
         return {}
-    return {key: json.loads(value) for key, value in parser.items("ignore", raw=True)}
+    return {key: json.loads(value)["path"] for key, value in parser.items("ignore", raw=True)}
 
 
-def append_exclusion(path: Path, filename: str) -> bool:
+def append_exclusion(path: Path, filename: str, reason: str = "import_failure",
+                     message: str = "Import failed") -> bool:
     """Atomically append one exclusion under a cross-process update lock."""
     path = Path(path)
     key = filename_key(filename)
-    lock_path = path.with_name(path.name + ".lock")
+    lock_path = vault_lock_path(path.parent).with_suffix(".exclusions.lock")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with process_lock(lock_path):
@@ -93,7 +100,21 @@ def append_exclusion(path: Path, filename: str) -> bool:
                 parser.add_section("ignore")
             if parser.has_option("ignore", key):
                 return False
-            parser.set("ignore", key, json.dumps(filename, ensure_ascii=False))
+            record = json.dumps({"path": filename, "reason": reason, "message": message}, ensure_ascii=False)
+            contents = (snapshot or b"").decode("utf-8")
+            newline = "\r\n" if "\r\n" in contents else "\n"
+            lines = contents.splitlines(keepends=True)
+            header = next((i for i, line in enumerate(lines)
+                           if (match := parser.SECTCRE.match(line.lstrip("\ufeff").strip()))
+                           and match["header"] == "ignore"), None)
+            entry = f"{key} = {record}{newline}"
+            if header is None:
+                contents += (newline if contents and not contents.endswith("\n") else "") + "[ignore]" + newline + entry
+            else:
+                if not lines[header].endswith("\n"):
+                    lines[header] += newline
+                lines.insert(header + 1, entry)
+                contents = "".join(lines)
             temporary: Path | None = None
             try:
                 with tempfile.NamedTemporaryFile(
@@ -101,7 +122,7 @@ def append_exclusion(path: Path, filename: str) -> bool:
                     suffix=".tmp", dir=path.parent, delete=False,
                 ) as stream:
                     temporary = Path(stream.name)
-                    parser.write(stream, space_around_delimiters=True)
+                    stream.write(contents)
                     stream.flush()
                     os.fsync(stream.fileno())
                 if path.is_symlink():
@@ -109,6 +130,8 @@ def append_exclusion(path: Path, filename: str) -> bool:
                 current = path.read_bytes() if path.exists() else None
                 if current != snapshot:
                     raise ExclusionsError(f"Exclusions file changed concurrently; refusing to overwrite: {path}")
+                if any(path.parent.glob(f"{path.stem}.sync-conflict-*{path.suffix}")):
+                    raise ExclusionsError(f"Syncthing conflict detected while updating {path}")
                 os.replace(temporary, path)
                 temporary = None
             finally:

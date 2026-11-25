@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+import json
 import os
 import shutil
 from dataclasses import dataclass
@@ -294,3 +295,28 @@ def resolve_vault_directory(vault: str | Path, configured: str) -> Path:
     except ValueError as error:
         raise ConfigError(f"Configured directory {configured!r} resolves outside vault {root}") from error
     return target
+
+def resolve_incoming(vault: Path, config: AppConfig) -> Path:
+    """Use Obsidian's attachment folder within the same vault safety boundary."""
+    app = vault / ".obsidian" / "app.json"
+    configured = config.general.incoming_directory
+    try:
+        if app.is_symlink() or app.parent.is_symlink():
+            raise ConfigError(f"Unsafe Obsidian configuration path: {app}")
+        try:
+            with app.open(encoding="utf-8-sig") as stream:
+                settings = json.load(stream)
+        except FileNotFoundError:
+            settings = {}
+        if not isinstance(settings, dict):
+            raise ConfigError(f"{app} must contain a JSON object")
+        if "attachmentFolderPath" in settings:
+            configured = settings["attachmentFolderPath"]
+            if not isinstance(configured, str) or not configured.strip() or "\x00" in configured:
+                raise ConfigError(f"Invalid attachmentFolderPath in {app}")
+        incoming = resolve_vault_directory(vault, configured)
+        if incoming == vault.resolve() or (incoming.exists() and not incoming.is_dir()):
+            raise ConfigError(f"Invalid Incoming directory: {incoming}")
+        return incoming
+    except (ValueError, OSError, RecursionError) as error:
+        raise ConfigError(f"Cannot resolve Incoming from {app}: {error}") from error

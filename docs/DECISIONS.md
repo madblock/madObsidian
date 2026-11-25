@@ -38,15 +38,15 @@ This document records the key architectural decisions in **madObsidian**, their 
 
 ---
 
-## ADR-003: Move-Only Vault Imports via Same-Filesystem `Path.rename()` (Preserving Legacy Copy Mode)
+## ADR-003: Move-Only Vault Imports via Same-Filesystem `Path.rename()`
 
 - **Status:** Accepted and implemented (`0.2.0`, commits `00269a7`, `b68778d`)
 - **Evidence:** Verified in code/tests (`importer.py:138-166`, `test_vault_import.py:485-520`); explicitly documented in `README.md`.
 - **Context:** Copying large media files inside a synchronized vault doubles temporary disk usage and leaves ambiguity over when it is safe to delete the `Incoming/` source.
-- **Decision:** Vault import (`import_vault`, one positional path) moves sources into staging using `Path.rename()` with no copy fallback, requiring `Incoming/` and `objects/` to reside on the same filesystem. The two-argument CLI form (`import_path`) is retained as a copy-only legacy importer for backward compatibility and rejects `--dry-run`.
+- **Decision:** Vault import (`import_vault`, one positional path) moves sources into staging using a no-overwrite rename with no copy fallback, requiring `Incoming/` and `objects/` to reside on the same filesystem. The vault argument selects the sole import mode.
 - **Consequences:**
   - Atomic source handoff on the same filesystem with hash checks before move, after move, and after preview processing.
-  - Trade-off: Cross-filesystem `Incoming/` and `objects/` layouts fail cleanly rather than falling back to copy; two distinct importer modes must be maintained and documented clearly.
+  - Trade-off: Cross-filesystem `Incoming/` and `objects/` layouts fail cleanly rather than falling back to copy..
 
 ---
 
@@ -55,7 +55,7 @@ This document records the key architectural decisions in **madObsidian**, their 
 - **Status:** Accepted and implemented (`0.2.0`, commit `7d3621b`)
 - **Evidence:** Verified in code/tests (`importer.py:778-889`, `test_vault_import.py:82-179`); established from Git history.
 - **Context:** `Incoming/` inside a Syncthing-synced vault may contain temporary sync files (`.syncthing.*.tmp`), hidden files, non-media files, or media dropped in before the user finishes referencing it in a note.
-- **Decision:** Vault import considers only direct, non-symlink, non-hidden files under `Incoming/` whose extension is in Pillow's `REGISTERED_IMAGE_EXTENSIONS` or `VIDEO_EXTENSIONS`, and only imports files referenced by at least one active Markdown wikilink/embed (or involved in an ambiguous reference).
+- **Decision:** Vault import considers non-symlink, non-hidden files recursively under `Incoming/` whose extension is in Pillow's `REGISTERED_IMAGE_EXTENSIONS` or `VIDEO_EXTENSIONS`, and only imports files referenced by at least one unambiguous active attachment reference.
 - **Consequences:**
   - Prevents premature ingestion of in-progress sync files or unlinked drops.
   - Trade-off: Unreferenced media stays in `Incoming/` silently until linked (reported as skipped); vault eligibility intentionally ignores MIME fallback (`mimetypes.guess_type`) used by legacy `is_video_candidate`.
@@ -67,10 +67,10 @@ This document records the key architectural decisions in **madObsidian**, their 
 - **Status:** Accepted and implemented (`0.2.0`, commit `00269a7`, refined in `27055dd`)
 - **Evidence:** Verified in code/tests (`importer.py:309-399, 435-685`, `test_vault_import.py:251-372`); explicitly documented in `README.md`.
 - **Context:** If an import crashes after publishing an object but before rewriting all referencing Markdown notes, the user may edit those notes before recovery runs. Saving full note snapshots would risk clobbering unrelated user edits on replay.
-- **Decision:** Record targeted `(old, new, count)` replacement entries in `transaction.json`. During replay, verify `text.count(old) + text.count(new) == count` before replacing and writing via `_atomic_text` (`fsync` + `os.replace`). Stop with a recovery conflict if the references themselves changed.
+- **Decision:** Record targeted `(old, new, count)` replacement entries in `transaction.json`. During replay, count active old links and already-applied replacements grouped by destination. Validate the source and UUID destination before writing through an atomic replacement. Stop with a recovery conflict if the references themselves changed.
 - **Consequences:**
   - Idempotent, repeatable recovery that preserves unrelated user edits.
-  - Trade-off: Manual edits to the exact reference being migrated trigger a conflict requiring human resolution; Markdown code-context detection still has known edge cases (frontmatter, nested inline code).
+  - Trade-off: Manual edits to the exact reference being migrated trigger a conflict requiring human resolution; the lexer supports the constructs listed in the specification.
 
 ---
 
@@ -83,7 +83,7 @@ Recovery takes the same local vault lock as import. The directory rename decides
 - **Context:** Previews must render reliably in Obsidian on desktop and mobile, carry human-readable metadata watermarks including Cyrillic/Unicode filenames without depending on host OS fonts, and accurately represent variable-frame-rate (VFR) phone recordings.
 - **Decision:**
   - Images (`>= threshold`): WebP (`<= 960px`, lossless when transparent, EXIF-oriented, first frame for animated formats).
-  - Videos (`>= threshold`): Full-length H.264 MP4 (`<= 400px` even canvas, `-bf 0`, `-fps_mode:v passthrough`, `-enc_time_base:v filter`, AAC 128k audio, `+faststart`), strictly verified post-encode against frame counts, intervals, duration, and A/V start offset via `ffprobe`.
+  - Videos (`>= threshold`): Full-length H.264 MP4 (`<= 400px` even canvas, `-bf 0`, `-fps_mode:v passthrough`, `-enc_time_base:v NUM:DEN`, AAC 128k audio, `+faststart`), strictly verified post-encode against frame counts, intervals, duration, and A/V start offset via `ffprobe`.
   - Bundle DejaVu Sans 2.37 (`DejaVuSans.ttf` + `DEJAVU-LICENSE.txt`) as the default watermark font.
 - **Consequences:**
   - Portable watermarking across Windows and Raspberry Pi/Linux without system font configuration; strong protection against corrupted or desynced video previews.
@@ -103,19 +103,19 @@ Recovery takes the same local vault lock as import. The directory rename decides
 
 ---
 
-## ADR-008: Persistent Failed-File Exclusions (`exclusions.ini` `[ignore]`) Replacing JSON Exclusions; `[pin]` Deferred
+## ADR-008: Persistent Failed-File Exclusions (`madobsidian_exclusions.ini` `[ignore]`) Replacing JSON Exclusions; `[pin]` Deferred
 
 - **Status:** Partially accepted — `[ignore]` implemented (`0.2.1`, commit `53d1fd6`); `[pin]` remains deferred; JSON failed-file exclusions permanently rejected (`27055dd`, `test_cli.py`)
 - **Evidence:** Verified in code/tests (`exclusions.py`, `importer.py`, `test_exclusions.py`, `test_cli.py:38-41`); established from Git history (`27055dd`, `53d1fd6`, stash names); explicitly documented in `README.md`.
 - **Context:** An earlier JSON-based failed-file exclusion system with `failed-imports list/clear` CLI commands was removed (`27055dd`). Without exclusions, however, an unreadable or permanently broken file in `Incoming/` repeatedly fails on every scheduled import run. Conversely, excluding a file whose rollback failed or whose object was already published risks silent data loss or stranded transactions.
 - **Decision:**
   - Never reintroduce JSON-based failed-file exclusions or `failed-imports` CLI subcommands.
-  - Record safely preserved failed filenames in a human-inspectable `exclusions.ini` (`[ignore]` section, `SHA-256(utf-8 filename) = "<json-filename>"`) located beside `config.ini` (or `vault.parent`), loaded *after* transaction recovery, validated fail-closed, and updated atomically under a dedicated lock.
+  - Each exclusion key hashes the UTF-8 Incoming-relative POSIX path. The JSON value stores its exact spelling, reason and message. The INI file lives at the vault root and synchronizes across devices.
   - This covers both post-move failures after verified rollback (size + SHA-256 match) and pre-transaction read failures (where the file and Markdown links were never touched and `_source_present` confirms the source remains in `Incoming/`).
   - Require manual line removal to retry. Keep `[pin]` (cache manager retention policy) deferred.
 - **Consequences:**
-  - Stops repeated failure churn on unreadable or broken media while keeping exclusions transparent and outside the synchronized vault.
-  - Trade-off: Filename-only keys mean replacing a broken file with a fixed file under the same name requires manual removal from `exclusions.ini`, and a transient read failure during hashing will also pause retries until manually removed.
+  - Stops repeated failure churn on unreadable or broken media while sharing explicit failure reasons across synchronized replicas.
+  - Trade-off: Path-based keys mean replacing a broken file with a fixed file at the same path requires manual removal from `madobsidian_exclusions.ini`, and a transient read failure during hashing will also pause retries until manually removed.
 
 ---
 
@@ -123,15 +123,15 @@ Recovery takes the same local vault lock as import. The directory rename decides
 
 - **Status:** Accepted and implemented (`0.2.1`, commit `53d1fd6`)
 - **Evidence:** Verified in code/tests (`locking.py`, `exclusions.py`, `importer.py`, `test_import_locking.py`, `test_exclusions.py`); explicitly documented in `README.md`.
-- **Context:** Automated runs (e.g., cron/scheduled tasks on Raspberry Pi or manual overlaps on Windows) could otherwise run two `import` processes against the same vault simultaneously, racing on moves and Markdown edits. Additionally, locking `exclusions.ini` directly on Windows would block `os.replace()`.
+- **Context:** Automated runs (e.g., cron/scheduled tasks on Raspberry Pi or manual overlaps on Windows) could otherwise run two `import` processes against the same vault simultaneously, racing on moves and Markdown edits. Additionally, locking `madobsidian_exclusions.ini` directly on Windows would block `os.replace()`.
 - **Decision:**
   - Serialize vault imports with a persistent lock file `vault.parent / .madobsidian-vault-<sha256(normcase(resolved_root))>.lock`.
-  - Serialize `exclusions.ini` updates with a separate `exclusions.ini.lock` file.
+  - Serialize `madobsidian_exclusions.ini` updates with a separate persistent lock in the vault parent.
   - Use OS-level locks (`msvcrt.locking` on Windows, `fcntl.flock` on POSIX) and never unlink lock files after release.
   - Enforce a strict lock hierarchy: vault lock → exclusions lock.
 - **Consequences:**
   - Deadlock-free, crash-safe (OS releases handles on exit), Windows `os.replace`-compatible, and isolated from Syncthing sync.
-  - Trade-off: `--dry-run` may create the small coordination `.lock` file in `vault.parent`; legacy `import_path`, `verify`, and `rebuild-index` do not currently acquire the vault lock.
+  - Trade-off: `--dry-run` may create the small coordination `.lock` file in `vault.parent`; standalone recovery, verification and rebuild acquire the same lock.
 
 ---
 

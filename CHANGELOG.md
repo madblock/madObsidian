@@ -6,6 +6,9 @@ History prior to the creation of this changelog is reconstructed strictly from G
 
 ## [Unreleased]
 
+- Import from the resolved Obsidian attachment folder through the vault CLI. Nested paths, NFC ambiguity and verified failures use shared Incoming-relative exclusions.
+- Journal portable storage names and active Markdown link edits. Report configuration, tools, archive state, pending operations and exclusions through read-only status.
+
 - Serialize archive verification and index replacement with vault imports. Preserve the index on incomplete sync, bounded metadata scans and decoder failures. Use the numeric input video time base for older FFmpeg builds.
 
 - Journal object preparation, Markdown completion and rollback progress. Standalone recovery now serializes with vault imports.
@@ -41,10 +44,10 @@ History prior to the creation of this changelog is reconstructed strictly from G
 
 ### Added
 
-- Persistent failed-import exclusions in `exclusions.ini` (`src/madobsidian/exclusions.py`), using an `[ignore]` section keyed by SHA-256 of the exact UTF-8 filename with JSON-encoded filename values, fail-closed validation, snapshot verification, and cross-process atomic replacement via `exclusions.ini.lock`.
+- Persistent failed-import exclusions in a local INI file (`src/madobsidian/exclusions.py`), using an `[ignore]` section keyed by SHA-256 of the exact UTF-8 filename with JSON-encoded filename values, fail-closed validation, snapshot verification, and cross-process atomic replacement under a separate local lock.
 - Cross-platform per-vault importer serialization lock (`src/madobsidian/locking.py`) placed in `vault.parent` as `.madobsidian-vault-<sha256>.lock` using `msvcrt.locking` on Windows and `fcntl.flock` on POSIX.
 - Separate CLI reporting for ignored files (`ImportBatchResult.ignored` and `Ignored:` lines in `src/madobsidian/cli.py`).
-- `.gitignore` entries for `exclusions.ini`, `exclusions.ini.lock`, and `.madobsidian-vault-*.lock`.
+- `.gitignore` entries for the local exclusions file, its lock, and `.madobsidian-vault-*.lock`.
 - Focused test suites in `tests/test_exclusions.py` and `tests/test_import_locking.py`, plus expanded failure reporting tests in `tests/test_import_failures.py`.
 
 ### Changed
@@ -80,7 +83,7 @@ History prior to the creation of this changelog is reconstructed strictly from G
 ### Added
 
 - Initial Python package skeleton (`pyproject.toml`, `madObsidian` CLI entry point, `--version`, `--help`, `status` placeholder).
-- Copy-only verified media importer (`import_path`) creating UUID object directories with SHA-256 verification and authoritative `metadata.json`.
+- Copy-only verified media importer creating UUID object directories with SHA-256 verification and authoritative `metadata.json`.
 - Cross-platform archived filename validation (`src/madobsidian/filenames.py`).
 - Archive verification (`verify` / `scan_archive`) and disposable index rebuilding (`rebuild-index` / `rebuild_index`) in `src/madobsidian/archive.py`.
 - Watermarked WebP image preview generation (`src/madobsidian/previews.py`) using Pillow (`>=10.0`) with EXIF orientation, transparency preservation, and bundled DejaVu Sans 2.37 font (`src/madobsidian/assets/`).

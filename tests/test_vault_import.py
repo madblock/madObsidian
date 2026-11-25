@@ -151,9 +151,9 @@ class VaultImportTests(unittest.TestCase):
         )
         with self._without_previews()[0], self._without_previews()[1]:
             rows = import_vault(self.vault)
-        self.assertEqual(len(rows), 2)
-        self.assertIn("[[café.jpg]]", note.read_text(encoding="utf-8"))
-        self.assertEqual(sum(len(row["ambiguities"]) for row in rows), 1)
+        self.assertEqual(len(rows), 0)
+        self.assertEqual(len(rows.skipped), 2)
+        self.assertTrue(first.exists() and second.exists())
 
     def test_basename_only_unicode_ambiguity_keeps_both_candidates(self):
         composed_name = "caf\u00e9.jpg"
@@ -171,14 +171,13 @@ class VaultImportTests(unittest.TestCase):
         with self._without_previews()[0], self._without_previews()[1]:
             rows = import_vault(self.vault)
 
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 0)
         self.assertEqual(note.read_text(encoding="utf-8"), original_reference)
-        ambiguities = [ambiguity for row in rows for ambiguity in row["ambiguities"]]
-        self.assertEqual(len(ambiguities), 1)
-        self.assertEqual(set(ambiguities[0]["candidates"]), {composed_name, decomposed_name})
-        self.assertFalse(first.exists())
-        self.assertFalse(second.exists())
-        self.assertEqual(len(list((self.vault / "objects").glob("[0-9a-f]*/shared/*.jpg"))), 2)
+        records = (self.vault / "madobsidian_exclusions.ini").read_text(encoding="utf-8")
+        self.assertEqual(records.count('"reason": "nfc_ambiguity"'), 2)
+        self.assertTrue(first.exists() and second.exists())
+        with mock.patch("madobsidian.importer._sha256", side_effect=AssertionError("unexpected hash")):
+            self.assertEqual(len(import_vault(self.vault).ignored), 2)
 
     def test_note_failure_keeps_source_and_rerun_recovers_without_duplicate(self):
         source = self.vault / "Incoming" / "recover.jpg"
@@ -260,9 +259,9 @@ class VaultImportTests(unittest.TestCase):
         real_write = importer._atomic_text
         calls = 0
 
-        def write_then_crash(path, value):
+        def write_then_crash(path, value, original):
             nonlocal calls
-            real_write(path, value)
+            real_write(path, value, original)
             calls += 1
             if calls == 1:
                 raise OSError("simulated crash after first note")
@@ -518,7 +517,7 @@ class VaultImportTests(unittest.TestCase):
         source.write_bytes(b"original moved to an unexpected staging path")
         (self.vault / "note.md").write_text("![[Incoming/displaced.jpg]]", encoding="utf-8")
         path_type = type(source)
-        real_rename = path_type.rename
+        real_rename = importer._rename_exclusive
 
         def move_then_displace(path, target):
             if Path(path).name == source.name and Path(path).parent.name == "Incoming":
@@ -529,7 +528,7 @@ class VaultImportTests(unittest.TestCase):
             return real_rename(path, target)
 
         with self._without_previews()[0], self._without_previews()[1], mock.patch.object(
-            path_type, "rename", autospec=True, side_effect=move_then_displace
+            importer, "_rename_exclusive", autospec=True, side_effect=move_then_displace
         ):
             failed = import_vault(self.vault)
         self.assertEqual(len(failed.failures), 1)
@@ -552,7 +551,7 @@ class VaultImportTests(unittest.TestCase):
         note.write_text("![[Incoming/rename-error.jpg]]\n", encoding="utf-8")
         original_note = note.read_bytes()
         path_type = type(source)
-        real_rename = path_type.rename
+        real_rename = importer._rename_exclusive
 
         def fail_source_rename(path, target):
             if Path(path).name == source.name and Path(path).parent.name == "Incoming":
@@ -561,7 +560,7 @@ class VaultImportTests(unittest.TestCase):
 
         with mock.patch("madobsidian.importer.generate_preview", return_value=None), mock.patch(
             "madobsidian.importer.generate_video_preview", return_value=None
-        ), mock.patch.object(path_type, "rename", autospec=True, side_effect=fail_source_rename), mock.patch(
+        ), mock.patch.object(importer, "_rename_exclusive", autospec=True, side_effect=fail_source_rename), mock.patch(
             "madobsidian.importer.shutil.copyfile", side_effect=AssertionError("copy fallback must not run")
         ):
             failed = import_vault(self.vault)
@@ -586,7 +585,7 @@ class VaultImportTests(unittest.TestCase):
         source.write_bytes(b"keep me")
         (self.vault / "note.md").write_text("![[Incoming/log-error.jpg]]", encoding="utf-8")
         path_type = type(source)
-        real_rename = path_type.rename
+        real_rename = importer._rename_exclusive
         real_open = path_type.open
 
         def fail_source_rename(path, target):
@@ -599,7 +598,7 @@ class VaultImportTests(unittest.TestCase):
                 raise PermissionError("log unavailable")
             return real_open(path, *args, **kwargs)
 
-        with mock.patch.object(path_type, "rename", autospec=True, side_effect=fail_source_rename), mock.patch.object(
+        with mock.patch.object(importer, "_rename_exclusive", autospec=True, side_effect=fail_source_rename), mock.patch.object(
             path_type, "open", autospec=True, side_effect=fail_log_open
         ):
             failed = import_vault(self.vault)

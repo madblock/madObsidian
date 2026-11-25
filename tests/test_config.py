@@ -130,16 +130,18 @@ class ConfigTests(unittest.TestCase):
         self.assertIsInstance(error, ConfigError)
         self.assertIn("unknown key", str(error))
 
-    def test_import_cli_accepts_config_and_legacy_syntax_still_works(self) -> None:
+    def test_import_cli_accepts_configured_objects_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "item.txt"
+            (root / "Incoming").mkdir()
+            (root / "note.md").write_text("[[item.png]]", encoding="utf-8")
+            source = root / "Incoming" / "item.png"
             source.write_text("sample", encoding="utf-8")
             config_path = root / "custom.ini"
             config_path.write_text("[general]\nobjects_directory = archive-objects\n", encoding="utf-8")
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                status = main(["import", str(source), str(root), "--config", str(config_path)])
+                status = main(["import", str(root), "--config", str(config_path)])
             self.assertEqual(status, 0)
             self.assertTrue((root / "archive-objects").is_dir())
             self.assertIn("Imported 1 file(s)", output.getvalue())

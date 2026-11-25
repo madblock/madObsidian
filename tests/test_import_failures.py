@@ -111,7 +111,7 @@ class ImportFailureTests(unittest.TestCase):
         self.assertFalse(source.exists())
         stages = list((self.vault / "objects").glob(".incomplete-*"))
         self.assertEqual(len(stages), 1)
-        self.assertFalse((self.vault.parent / "exclusions.ini").exists())
+        self.assertFalse((self.vault / "madobsidian_exclusions.ini").exists())
         staged_original = stages[0] / "shared" / source.name
         self.assertEqual(hashlib.sha256(staged_original.read_bytes()).hexdigest(), digest)
         self.assertTrue((stages[0] / "transaction.json").is_file())
@@ -129,13 +129,13 @@ class ImportFailureTests(unittest.TestCase):
 
         self.assertEqual(len(failed.failures), 1)
         self.assertTrue(source.is_file())
-        exclusions_file = exclusion_path(None, self.vault)
+        exclusions_file = exclusion_path(self.vault)
         self.assertEqual(set(load_exclusions(exclusions_file).values()), {"same.jpg"})
 
         with mock.patch("madobsidian.importer._sha256", side_effect=AssertionError("excluded file was hashed")), \
                 mock.patch("madobsidian.importer.generate_preview", side_effect=AssertionError("preview attempted")):
             ignored = import_vault(self.vault)
-        self.assertEqual(ignored.ignored, [{"source": "same.jpg", "reason": "listed in exclusions.ini"}])
+        self.assertEqual(ignored.ignored, [{"source": "same.jpg", "reason": "listed in madobsidian_exclusions.ini"}])
         self.assertTrue(source.is_file())
 
         exclusions_file.write_text("[ignore]\n", encoding="utf-8")
@@ -170,7 +170,7 @@ class ImportFailureTests(unittest.TestCase):
             ignored_result = main(["import", str(self.vault)])
         self.assertEqual(ignored_result, 0)
         self.assertIn("Imported 0 file(s); skipped 0; ignored 1; failed 0.", ignored_output.getvalue())
-        self.assertIn("Ignored: a-fail.jpg (listed in exclusions.ini)", ignored_output.getvalue())
+        self.assertIn("Ignored: a-fail.jpg (listed in madobsidian_exclusions.ini)", ignored_output.getvalue())
 
     def test_cli_successful_batch_returns_zero(self) -> None:
         self.add_file("good.jpg")

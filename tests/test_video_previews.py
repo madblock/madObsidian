@@ -17,7 +17,7 @@ from unittest import mock
 from PIL import ImageDraw
 
 from madobsidian.archive import scan_archive
-from madobsidian.importer import import_path
+from test_importer import import_fixture
 from madobsidian.video_previews import (
     VIDEO_PREVIEW_THRESHOLD_BYTES,
     VideoPreviewError,
@@ -131,7 +131,7 @@ class VideoPreviewTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def _object_preview(self, result, name: str = "preview.mp4") -> Path:
-        return self.archive / "objects" / result.metadata.id / "previews" / name
+        return self.archive / "objects" / result["id"] / "previews" / name
 
     def test_cfr_video_with_audio_generates_full_h264_aac_watermarked_preview(self) -> None:
         source = self._make_cfr("Клип-cfr.mp4", audio=True)
@@ -149,8 +149,8 @@ class VideoPreviewTests(unittest.TestCase):
             return original_draw_text(draw, xy, text, *args, **kwargs)
 
         with mock.patch.object(ImageDraw.ImageDraw, "text", capture_text):
-            result = import_path(source, self.archive)[0]
-        object_dir = self.archive / "objects" / result.metadata.id
+            result = import_fixture(source, self.archive)[0]
+        object_dir = self.archive / "objects" / result["id"]
         preview = self._object_preview(result)
         self.assertTrue(preview.is_file())
         streams = self._probe(preview)["streams"]
@@ -165,12 +165,12 @@ class VideoPreviewTests(unittest.TestCase):
         self.assertIn("00:00:02.00", text)
         self.assertEqual(source.read_bytes(), original_bytes)
         self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), original_hash)
-        self.assertEqual((object_dir / source.name).read_bytes(), original_bytes)
+        self.assertEqual((object_dir / "originals" / source.name).read_bytes(), original_bytes)
 
     def test_silent_cfr_video_generates_preview_without_audio(self) -> None:
         source = self._make_cfr("silent.mp4", audio=False)
         self._pad_mp4_to(source, VIDEO_PREVIEW_THRESHOLD_BYTES)
-        result = import_path(source, self.archive)[0]
+        result = import_fixture(source, self.archive)[0]
         streams = self._probe(self._object_preview(result))["streams"]
         self.assertEqual([stream["codec_type"] for stream in streams], ["video"])
 
@@ -191,7 +191,7 @@ class VideoPreviewTests(unittest.TestCase):
             return original_draw_text(draw, xy, text, *args, **kwargs)
 
         with mock.patch.object(ImageDraw.ImageDraw, "text", capture_text):
-            result = import_path(source, self.archive)[0]
+            result = import_fixture(source, self.archive)[0]
         output = self._object_preview(result)
         output_info = _inspect_video(self.ffprobe, output)
         output_timeline = _probe_timeline(self.ffprobe, output, "v:0", _probe_fraction(output_info.video["time_base"]))
@@ -217,7 +217,7 @@ class VideoPreviewTests(unittest.TestCase):
         )
         source_offset = source_audio_timeline.timestamps[0] - source_video_timeline.timestamps[0]
 
-        result = import_path(source, self.archive)[0]
+        result = import_fixture(source, self.archive)[0]
         output = self._object_preview(result)
         output_probe = self._probe(output)
         output_video = next(s for s in output_probe["streams"] if s["codec_type"] == "video")
@@ -248,14 +248,14 @@ class VideoPreviewTests(unittest.TestCase):
     def test_below_threshold_video_has_no_preview(self) -> None:
         source = self._make_cfr("small.mp4", audio=False)
         self.assertLess(source.stat().st_size, VIDEO_PREVIEW_THRESHOLD_BYTES)
-        result = import_path(source, self.archive)[0]
-        self.assertFalse((self.archive / "objects" / result.metadata.id / "previews").exists())
+        result = import_fixture(source, self.archive)[0]
+        self.assertFalse((self.archive / "objects" / result["id"] / "previews").exists())
 
     def test_exact_threshold_video_gets_preview(self) -> None:
         source = self._make_cfr("threshold.mp4", audio=False)
         self._pad_mp4_to(source, VIDEO_PREVIEW_THRESHOLD_BYTES)
         self.assertEqual(source.stat().st_size, 256_000)
-        result = import_path(source, self.archive)[0]
+        result = import_fixture(source, self.archive)[0]
         self.assertTrue(self._object_preview(result).is_file())
         report = scan_archive(self.archive)
         self.assertEqual(report.problems, ())
@@ -263,15 +263,18 @@ class VideoPreviewTests(unittest.TestCase):
     def test_large_nonvideo_input_has_no_video_preview(self) -> None:
         source = self.root / "not-video.bin"
         source.write_bytes(b"not a video" + b"\0" * (VIDEO_PREVIEW_THRESHOLD_BYTES - len(b"not a video")))
-        result = import_path(source, self.archive)[0]
-        self.assertFalse((self.archive / "objects" / result.metadata.id / "previews").exists())
+        batch = import_fixture(source, self.archive)
+        self.assertEqual(len(batch), 0)
+        self.assertEqual(batch.skipped[0]["reason"], "unsupported media extension")
+        self.assertFalse((self.archive / "objects").exists())
 
     def test_ffprobe_failure_aborts_import_and_cleans_temporary_object(self) -> None:
         source = self._make_cfr("probe-failure.mp4", audio=False)
         self._pad_mp4_to(source, VIDEO_PREVIEW_THRESHOLD_BYTES)
         with mock.patch.dict(os.environ, {"MADOBSIDIAN_FFPROBE": str(self.root / "missing-ffprobe.exe")}):
-            with self.assertRaises(VideoPreviewError):
-                import_path(source, self.archive)
+            batch = import_fixture(source, self.archive)
+            self.assertEqual(len(batch.failures), 1)
+            self.assertFalse(batch.failures[0]["serious"])
         self.assertEqual(list((self.archive / "objects").iterdir()), [])
 
     def test_ffmpeg_failure_aborts_import_and_cleans_temporary_object(self) -> None:
@@ -285,8 +288,9 @@ class VideoPreviewTests(unittest.TestCase):
             return actual_run(command, *args, **kwargs)
 
         with mock.patch("madobsidian.video_previews.subprocess.run", side_effect=fail_ffmpeg):
-            with self.assertRaises(VideoPreviewError):
-                import_path(source, self.archive)
+            batch = import_fixture(source, self.archive)
+            self.assertEqual(len(batch.failures), 1)
+            self.assertFalse(batch.failures[0]["serious"])
         self.assertEqual(list((self.archive / "objects").iterdir()), [])
 
     def test_rotated_video_preview_uses_display_dimensions(self) -> None:
@@ -322,7 +326,7 @@ class VideoPreviewTests(unittest.TestCase):
             return original_draw_text(draw, xy, text, *args, **kwargs)
 
         with mock.patch.object(ImageDraw.ImageDraw, "text", capture_text):
-            result = import_path(rotated, self.archive)[0]
+            result = import_fixture(rotated, self.archive)[0]
 
 
         output = self._object_preview(result)

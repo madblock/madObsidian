@@ -10,15 +10,15 @@ For behavioral details, see [SPECIFICATION.md](SPECIFICATION.md). For workflow a
 
 - **AC-1.1 Byte-for-byte original preservation:** Every imported file's stored original must match the pre-import source byte-for-byte (verified by size and SHA-256). Originals are never modified in place.
 - **AC-1.2 Atomic publication:** An object directory under `objects/<uuid>/` is published only after original verification, eligible preview generation, and `metadata.json` creation (`fsync`) succeed inside `.incomplete-*`. Failed imports must never leave a published partial object.
-- **AC-1.3 No cross-filesystem silent copy in vault mode:** Vault imports move files via `Path.rename()`. If rename fails, the source remains intact in `Incoming/`, no object is published, and no Markdown note is modified.
-- **AC-1.4 Strict vault boundary and symlink rejection:** Vault directories, `Incoming/`, `objects/`, source files, `metadata.json`, `transaction.json`, `exclusions.ini`, `index.json`, and journal-referenced paths must reject symlinks and path traversal (`..`, absolute escapes).
-- **AC-1.5 Dry-run purity and result separation:** `--dry-run` must leave the vault, notes, `Incoming/`, `objects/`, `config.ini`, `exclusions.ini`, and `import.log` byte-for-byte unchanged. Creating the persistent coordination lock file `.madobsidian-vault-<sha256>.lock` in `vault.parent` is the only permitted filesystem side effect. `ImportBatchResult` must report planned imports in the list (`len(batch)`) and pending recovery operations separately in `batch.recoveries`, and the CLI must report planned imports and pending recoveries separately.
+- **AC-1.3 No cross-filesystem silent copy in vault mode:** Vault imports move files via an atomic no-overwrite rename. If rename fails, the source remains intact in `Incoming/`, no object is published, and no Markdown note is modified.
+- **AC-1.4 Strict vault boundary and symlink rejection:** Vault directories, `Incoming/`, `objects/`, source files, `metadata.json`, `transaction.json`, `madobsidian_exclusions.ini`, `index.json`, and journal-referenced paths must reject symlinks and path traversal (`..`, absolute escapes).
+- **AC-1.5 Dry-run purity and result separation:** `--dry-run` must leave the vault, notes, `Incoming/`, `objects/`, `config.ini` and `madobsidian_exclusions.ini` unchanged. A missing Incoming emits a warning to the external `import.log`. Otherwise dry-run leaves the log unchanged. Creating the persistent coordination lock file `.madobsidian-vault-<sha256>.lock` in `vault.parent` is permitted. `ImportBatchResult` must report planned imports in the list (`len(batch)`) and pending recovery operations separately in `batch.recoveries`, and the CLI must report planned imports and pending recoveries separately.
 
 ---
 
 ## 2. Candidate Filtering and Markdown Rewriting
 
-- **AC-2.1 Direct-child Incoming scope:** Vault import considers only regular, non-symlink files directly inside `incoming_directory`. Nested directories, hidden files (`.` prefix), unsupported extensions, and unreferenced media must remain untouched in `Incoming/`.
+- **AC-2.1 Recursive Incoming scope:** Vault import considers only regular, non-symlink files under the resolved Incoming directory. Hidden files (`.` prefix), unsupported extensions, and unreferenced media must remain untouched in `Incoming/`.
 - **AC-2.2 Code-context preservation:** Wikilinks inside fenced code blocks and inline code spans must not be rewritten.
 - **AC-2.3 Link semantics and formatting preservation:**
   - Small files (`< threshold`) rewrite to `<objects_dir>/<uuid>/shared/<filename>`.
@@ -39,11 +39,11 @@ For behavioral details, see [SPECIFICATION.md](SPECIFICATION.md). For workflow a
   - Configuration changes (`incoming_directory`, `objects_directory`, `small_file_threshold_bytes`) must fail closed while pending transactions exist.
   - Kill the importing or recovering process at each durable boundary. Inspect the surviving original and journal, then run recovery in two fresh processes and compare their filesystem results.
 - **AC-3.4 Exclusion safety gates:**
-  - Transaction recovery must always run *before* `exclusions.ini` is loaded or applied.
+  - Transaction recovery must always run *before* `madobsidian_exclusions.ini` is loaded or applied.
   - An exclusion must **never** be written when rollback failed, when an object was already published, or when the original cannot be confirmed intact at `Incoming/` (size and SHA-256 match after hashing/rollback; untouched file presence via `_source_present` when a read failure occurs before hashing starts so unreadable files and their Markdown links remain untouched and are ignored on subsequent runs).
   - Ordinary skips (hidden, unsupported, unreferenced) must never create exclusions.
-  - Malformed `exclusions.ini` (bad syntax, unknown section, bad hash key, hash/value mismatch, symlink) must fail closed before processing files.
-  - Removing a line manually from `exclusions.ini` must re-enable retry on the next run.
+  - Malformed `madobsidian_exclusions.ini` (bad syntax, bad hash key, hash/value mismatch, symlink) must fail closed before processing files.
+  - Removing a line manually from `madobsidian_exclusions.ini` must re-enable retry on the next run.
   - Excluded files must be skipped before content hashing, preview generation, or Markdown planning, and reported separately from ordinary skips.
 - **AC-3.5 No JSON failed-file exclusions:** Automatic JSON-based failed-file exclusions and obsolete `failed-imports list/clear` CLI commands must not be reintroduced.
 
@@ -52,8 +52,8 @@ For behavioral details, see [SPECIFICATION.md](SPECIFICATION.md). For workflow a
 ## 4. Concurrency and Cross-Platform Compatibility
 
 - **AC-4.1 Vault import serialization:** Concurrent `import_vault` processes targeting the same resolved vault must serialize via `vault.parent / .madobsidian-vault-<sha256>.lock` and never produce duplicate objects or corrupted notes.
-- **AC-4.2 Atomic concurrent exclusion updates:** Concurrent writers to `exclusions.ini` must serialize via `exclusions.ini.lock`, reload under the lock, verify snapshot continuity, and replace atomically without losing entries or leaving `.exclusions-*.tmp` artifacts.
-- **AC-4.3 Deadlock-free lock ordering:** Lock acquisition order must remain strictly `vault_import_lock` → `exclusions.ini.lock`; lock files persist after release and OS handles release automatically on crash.
+- **AC-4.2 Atomic concurrent exclusion updates:** Concurrent writers to `madobsidian_exclusions.ini` must serialize via the local exclusions lock, reload under the lock, verify snapshot continuity, and replace atomically without losing entries or leaving `.exclusions-*.tmp` artifacts.
+- **AC-4.3 Deadlock-free lock ordering:** Lock acquisition order must remain strictly `vault_import_lock` → the local exclusions lock; lock files persist after release and OS handles release automatically on crash.
 - **AC-4.4 Windows and Raspberry Pi/Linux parity:** All features must work on Python `>= 3.11` across Windows (`msvcrt`) and Linux/Raspberry Pi (`fcntl`) with `Pillow >= 10.0` as the only Python runtime dependency (plus `ffmpeg`/`ffprobe` for video).
 
 ---

@@ -41,7 +41,7 @@ class ExclusionsTests(unittest.TestCase):
         self.config_file.parent.mkdir()
         self.config_file.write_text("[general]\n", encoding="utf-8")
         self.config = AppConfig(config_path=self.config_file)
-        self.exclusions_file = exclusion_path(self.config_file, self.vault)
+        self.exclusions_file = exclusion_path(self.vault)
 
     def add_referenced_file(self, filename: str, contents: bytes = b"file contents") -> Path:
         source = self.vault / "Incoming" / filename
@@ -78,7 +78,7 @@ class ExclusionsTests(unittest.TestCase):
 
         self.assertEqual(rerun, [])
         self.assertEqual(rerun.failures, [])
-        self.assertEqual(rerun.ignored, [{"source": filename, "reason": "listed in exclusions.ini"}])
+        self.assertEqual(rerun.ignored, [{"source": filename, "reason": "listed in madobsidian_exclusions.ini"}])
         self.assertTrue(source.is_file())
         self.assertEqual(source.read_bytes(), original_bytes)
         self.assertEqual(note.read_text(encoding="utf-8"), original_note)
@@ -110,7 +110,7 @@ class ExclusionsTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), b"verified original")
         self.assertEqual(len(result.failures), 1)
         self.assertEqual(load_exclusions(self.exclusions_file), {expected_key: filename})
-        self.assertIn(f'{expected_key} = "{filename}"', self.exclusions_file.read_text(encoding="utf-8"))
+        self.assertIn(f'"path": "{filename}"', self.exclusions_file.read_text(encoding="utf-8"))
 
     def test_excluded_file_is_skipped_without_content_hash_or_preview_work(self) -> None:
         filename = "already-excluded.jpg"
@@ -121,7 +121,7 @@ class ExclusionsTests(unittest.TestCase):
                 mock.patch("madobsidian.importer.generate_video_preview", side_effect=AssertionError("video preview attempted")):
             result = import_vault(self.vault, config=self.config)
         self.assertEqual(result, [])
-        self.assertEqual(result.ignored, [{"source": filename, "reason": "listed in exclusions.ini"}])
+        self.assertEqual(result.ignored, [{"source": filename, "reason": "listed in madobsidian_exclusions.ini"}])
         self.assertTrue(source.is_file())
 
     def test_manually_removing_exclusion_reenables_retry_without_stale_entry(self) -> None:
@@ -155,7 +155,7 @@ class ExclusionsTests(unittest.TestCase):
         filename = "unverifiable.jpg"
         source = self.add_referenced_file(filename)
         with mock.patch("madobsidian.importer._markdown_plan", side_effect=OSError("planning failed")), mock.patch(
-            "madobsidian.importer._source_matches", return_value=False
+            "madobsidian.importer._source_present", return_value=False
         ):
             result = import_vault(self.vault, config=self.config)
         self.assertEqual(len(result.failures), 1)
@@ -171,7 +171,7 @@ class ExclusionsTests(unittest.TestCase):
         ):
             result = import_vault(self.vault, config=self.config)
         self.assertEqual(len(result.failures), 1)
-        self.assertIn("exclusions.ini update failed", result.failures[0]["reason"])
+        self.assertIn("madobsidian_exclusions.ini update failed", result.failures[0]["reason"])
         self.assertTrue(source.exists())
         self.assertFalse(self.exclusions_file.exists())
 
@@ -208,7 +208,7 @@ class ExclusionsTests(unittest.TestCase):
         append_exclusion(self.exclusions_file, filename)
         self.assertEqual(load_exclusions(self.exclusions_file), {filename_key(filename): filename})
         stored_value = json.dumps(filename, ensure_ascii=False)
-        self.assertIn(f"{filename_key(filename)} = {stored_value}", self.exclusions_file.read_text(encoding="utf-8"))
+        self.assertIn(f'"path": {stored_value}', self.exclusions_file.read_text(encoding="utf-8"))
 
     def test_malformed_exclusions_fail_after_transaction_recovery_and_before_file_work(self) -> None:
         source = self.add_referenced_file("malformed.jpg")
@@ -239,10 +239,25 @@ class ExclusionsTests(unittest.TestCase):
         self.assertTrue(all(process.exitcode == 0 for process in processes))
         self.assertEqual({results.get(timeout=5) for _ in processes}, {("ok", "one.jpg"), ("ok", "two.jpg")})
         self.assertEqual(set(load_exclusions(self.exclusions_file).values()), {"one.jpg", "two.jpg"})
-        self.assertTrue(self.exclusions_file.with_name("exclusions.ini.lock").exists())
+        self.assertTrue(list(self.base.glob("*.exclusions.lock")))
 
-    def test_unconfigured_exclusions_path_is_vault_parent(self) -> None:
-        self.assertEqual(exclusion_path(None, self.vault), self.vault.parent / "exclusions.ini")
+    def test_exclusions_path_is_inside_vault(self) -> None:
+        self.assertEqual(exclusion_path(self.vault), self.vault / "madobsidian_exclusions.ini")
+
+    def test_unrelated_content_and_conflicting_edit_survive(self):
+        prefix = b"; operator notes\r\n[other]\r\nsetting = keep\r\n"
+        self.exclusions_file.write_bytes(prefix)
+        append_exclusion(self.exclusions_file, "nested/one.png")
+        self.assertTrue(self.exclusions_file.read_bytes().startswith(prefix))
+        snapshot = self.exclusions_file.read_bytes()
+
+        def concurrent_update(_fd):
+            self.exclusions_file.write_bytes(snapshot + b"; concurrent edit\r\n")
+
+        with mock.patch("madobsidian.exclusions.os.fsync", side_effect=concurrent_update):
+            with self.assertRaisesRegex(ExclusionsError, "changed concurrently"):
+                append_exclusion(self.exclusions_file, "nested/two.png")
+        self.assertEqual(self.exclusions_file.read_bytes(), snapshot + b"; concurrent edit\r\n")
 
 
 if __name__ == "__main__":

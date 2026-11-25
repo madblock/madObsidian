@@ -22,10 +22,8 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             result = main(["status"])
         self.assertEqual(result, 0)
-        self.assertEqual(
-            output.getvalue().strip(),
-            "madObsidian 0.2.2: ready (no archive configured)",
-        )
+        for field in ("madObsidian 0.2.2", "Configuration:", "ffmpeg:", "ffprobe:", "Vault: unspecified"):
+            self.assertIn(field, output.getvalue())
 
     def test_help(self) -> None:
         output = io.StringIO()
@@ -43,13 +41,16 @@ class CliTests(unittest.TestCase):
     def test_import_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "item.txt"
+            incoming = root / "Incoming"
+            incoming.mkdir()
+            (root / "note.md").write_text("[[item.png]]", encoding="utf-8")
+            source = incoming / "item.png"
             source.write_text("content", encoding="utf-8")
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                result = main(["import", str(source), str(root / "archive")])
+                result = main(["import", str(root)])
             self.assertEqual(result, 0)
-            self.assertIn("Imported 1 file(s).", output.getvalue())
+            self.assertIn("Imported 1 file(s);", output.getvalue())
 
     def test_legacy_dry_run_is_rejected_without_importing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -58,10 +59,9 @@ class CliTests(unittest.TestCase):
             source.write_text("must remain", encoding="utf-8")
             archive = root / "archive"
             output = io.StringIO()
-            with contextlib.redirect_stderr(output):
-                result = main(["import", str(source), str(archive), "--dry-run"])
-            self.assertEqual(result, 1)
-            self.assertIn("--dry-run is only supported for vault imports", output.getvalue())
+            with contextlib.redirect_stderr(output), self.assertRaises(SystemExit) as error:
+                main(["import", str(source), str(archive), "--dry-run"])
+            self.assertEqual(error.exception.code, 2)
             self.assertTrue(source.exists())
             self.assertFalse(archive.exists())
 

@@ -27,9 +27,8 @@ python -m pip install -e .
 ```powershell
 madObsidian --help
 madObsidian --version
-madObsidian status
+madObsidian status [<vault-directory>] [--config config.ini]
 madObsidian import <vault-directory> [--dry-run] [--config config.ini]
-madObsidian import <file-or-directory> <archive-directory> [--config config.ini]  # legacy copy mode
 madObsidian verify <vault-or-archive-root> [--config config.ini]
 madObsidian rebuild-index <vault-or-archive-root> [--config config.ini]
 ```
@@ -42,14 +41,17 @@ python -m unittest discover -s tests -v
 
 ### Key Usage Notes
 
-- **Vault mode (`import <vault>`):** Moves referenced, direct-child media files from `Incoming/` into `objects/<uuid>/{shared|originals}/`, rewrites Markdown wikilinks/embeds (adding `madobsidian://<UUID>` original links for large files), serializes runs with a per-vault lock in `vault.parent`, logs failures to `vault.parent/import.log`, and records safely rolled-back failures in `exclusions.ini` (`[ignore]`). Supports `--dry-run` with unified Markdown diffs and separate pending-recovery counts.
-- **Legacy mode (`import <src> <archive>`):** Copy-only importer for compatibility; does not modify sources, rewrite Markdown, use transactions/exclusions, or accept `--dry-run`.
+- **Vault mode (`import <vault>`):** Moves referenced media files under the resolved Incoming folder into `objects/<uuid>/{shared|originals}/`, rewrites Markdown wikilinks/embeds (adding `madobsidian://<UUID>` original links for large files), serializes runs with a per-vault lock in `vault.parent`, logs failures to `vault.parent/import.log`, and records safely rolled-back failures in `madobsidian_exclusions.ini` (`[ignore]`). Supports `--dry-run` with unified Markdown diffs and separate pending-recovery counts.
 - **Verification (`verify` / `rebuild-index`):** Pass the vault or archive root containing `index.json` (not `objects/` itself), along with the same `--config` if custom `objects_directory` or `small_file_threshold_bytes` settings are used. `rebuild-index` refuses to replace `index.json` if any archive problem is found.
-- **Failures and retries:** If read of large file fails at any point, it leaves the file and corresponding links in .md files untouched and makes an entry in `exclusions.ini` under `[ignore]` section in order not to encounter the failure next time. If the user want the app to revisit the large file, it should remove the corresponding entry from the `exclusions.ini`
+- A failed import with a verified source creates an entry in the vault's `madobsidian_exclusions.ini`. Remove the matching line to authorize a retry. An incomplete rollback retains the journal. A published object with an unfinished note update is finalized by recovery.
+- Basename ambiguity leaves the candidates in Incoming. Qualify the reference or rename the files, then remove their exclusions. Portable renaming happens during the journaled move into staging.
+- Use `status <vault>` for lightweight diagnostics, including recovery and exclusion counts. Use `verify` for content verification.
 
 ## Configuration
 
 Copy [`config.example.ini`](config.example.ini) to a local `config.ini` (ignored by Git) and pass `--config config.ini`. When `--config` is omitted, built-in defaults matching `config.example.ini` are used. Configuration is strictly validated at startup (unknown keys, invalid ranges, unsupported formats/codecs, and unreadable fonts fail fast).
+
+Obsidian's `.obsidian/app.json` setting `attachmentFolderPath` takes precedence over the INI fallback. The folder must resolve inside the vault. Missing folders are reported to the local import log and treated as empty. Status reports the missing path read-only.
 
 Default key settings:
 
@@ -59,7 +61,7 @@ Default key settings:
 - `[watermark]`: `enabled = true`, `font = bundled` (DejaVu Sans 2.37; custom fonts are validated only when `enabled = true`), `font_size = auto`, `opacity = auto`, `position = bottom-left`, `margin = auto`
 - `[tools]`: `ffmpeg = auto`, `ffprobe = auto` (optional; `auto` discovers lazily on `PATH` only when needed)
 
-See [docs/SPECIFICATION.md](docs/SPECIFICATION.md) for full configuration rules, path resolution, and `exclusions.ini` details.
+See [docs/SPECIFICATION.md](docs/SPECIFICATION.md) for full configuration rules, path resolution, and `madobsidian_exclusions.ini` details.
 
 ## Multi-Device Syncthing Deployment
 
@@ -80,7 +82,7 @@ objects/*/*
 objects/.incomplete-*
 ```
 
-Machine-local coordination files (`import.log`, `.madobsidian-vault-<sha256>.lock`, `exclusions.ini`, and `exclusions.ini.lock`) are stored outside the synchronized vault directory.
+Synchronize `madobsidian_exclusions.ini` at the vault root. The import log and both local lock files live beside the vault. Stop and resolve Syncthing conflict copies before resuming imports. A clean local scan describes files visible on that device. Check Syncthing convergence separately.
 
 ## Documentation
 

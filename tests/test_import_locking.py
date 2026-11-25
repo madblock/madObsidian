@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from madobsidian.locking import vault_lock_path
+from madobsidian.locking import vault_import_lock, vault_lock_path
 
 
 def _import_worker(vault_text: str, barrier, results) -> None:
@@ -21,7 +21,32 @@ def _import_worker(vault_text: str, barrier, results) -> None:
         results.put(("error", repr(error)))
 
 
+def _maintenance_worker(operation, vault, started, finished):
+    from madobsidian.archive import rebuild_index, scan_archive
+    from madobsidian.importer import recover_transactions
+    started.set()
+    {"verify": scan_archive, "rebuild": rebuild_index, "recover": recover_transactions}[operation](vault)
+    finished.set()
+
+
 class ImportLockTests(unittest.TestCase):
+    def test_maintenance_waits_for_same_vault_lock(self):
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory) / "vault"
+            (vault / "objects").mkdir(parents=True)
+            for operation in ("verify", "rebuild", "recover"):
+                started, finished = context.Event(), context.Event()
+                proc = context.Process(target=_maintenance_worker, args=(operation, vault, started, finished))
+                with self.subTest(operation=operation):
+                    with vault_import_lock(vault):
+                        proc.start()
+                        self.assertTrue(started.wait(10))
+                        self.assertFalse(finished.wait(0.25))
+                    proc.join(10)
+                    self.assertEqual(proc.exitcode, 0)
+                    self.assertTrue(finished.is_set())
+
     def test_vault_lock_path_is_stable_hashed_in_parent_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             vault = Path(directory) / "vault"

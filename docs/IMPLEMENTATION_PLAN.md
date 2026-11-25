@@ -73,34 +73,7 @@ All five Phase 1 workstreams have been implemented and verified in the working t
 
 ### Phase 2: Robustness & Cross-Platform Hardening (`0.3.x` candidates)
 
-Phase 2 is authorized for `develop`. The initial checkpoint covers standalone recovery coordination, publication and rollback phases, and subprocess interruption tests. Later items remain open until verified.
-
-1. **`[Hardening]` Transaction journal & power-loss hardening (`importer.py`, `archive.py`, `exclusions.py`)**
-   - Strengthen semantic validation of `transaction.json` and constrain recovery filesystem changes further.
-   - Add directory-level `fsync` after atomic renames on POSIX (Linux / Raspberry Pi).
-   - Document a clear operator recovery runbook for unrecoverable staging/journal conflicts.
-2. **`[Hardening]` / `[Design proposal]` Concurrency coordination for `verify`/`rebuild-index` and legacy `import_path` decision (`archive.py`, `importer.py`, `locking.py`)**
-   - `[Hardening]` Add locking or explicit concurrency coordination for `verify` and `rebuild-index` so they do not report transient `.incomplete-*` stages as archive problems during an active `import_vault`.
-   - `[Design proposal]` Decide whether legacy two-path `import_path` should acquire the archive/vault lock, remain unlocked as legacy compatibility, or be deprecated.
-3. **`[Required correction]` NFC-equivalent basename ambiguity (`importer.py:878-882`, `tests/test_vault_import.py:155-179`)**
-   - **Correctness requirement (kept in Phase 2; do not pull into `0.2.2` without separate approval):** Currently, when multiple NFC-equivalent files in `Incoming/` make a basename-only Markdown reference ambiguous, both files are moved into `objects/` while the Markdown reference is left unchanged, which can leave links unresolved.
-   - **Agreed target behavior:**
-     - Leave all ambiguous NFC-equivalent candidates in `Incoming/`; do not move either candidate into `objects/`.
-     - Report the ambiguity clearly as skipped/ambiguous so the user can rename a file or qualify the Markdown reference (`Incoming/...`) and rerun the importer.
-     - Add tests proving neither candidate is moved and the Markdown reference remains unchanged, and update [SPECIFICATION.md](SPECIFICATION.md).
-4. **`[Hardening]` Archive scan completeness & resource safety (`archive.py`, `previews.py`)**
-   - Detect and report unexpected non-UUID directories/entries inside `objects/` (`archive.py:314-317`) instead of silently skipping them during `verify` and `rebuild-index`.
-   - Guard Pillow decoding and verification against decompression bombs and resource-exhaustion inputs.
-5. **`[Hardening]` Cross-platform filename portability (`filenames.py`, `exclusions.py`)**
-   - Define and enforce rules for Windows-incompatible filenames (reserved characters `< > : " | ? *`, reserved device names, trailing dots/spaces) and ensure `exclusions.py` rejects backslashes consistently on Linux.
-6. **`[Hardening]` Markdown context hardening (`importer.py`)**
-   - Exclude YAML frontmatter from link rewriting.
-   - Fix inline-code backtick scanning so fenced code block delimiters cannot pair across block boundaries.
-7. **`[Design proposal]` / `[Hardening]` CLI `status` (`cli.py:44-46`) and targeted test-coverage improvements**
-   - `[Design proposal]` Replace the static `ready (no archive configured)` placeholder in `madObsidian status` with real vault/archive inspection (e.g., pending transactions, ignored count, lock presence, active config) or explicitly formalize its minimal scope.
-   - `[Hardening]` Address high-value test-coverage gaps identified in the baseline audit (deterministic lock-contention/exception-release tests, recovery-before-exclusions ordering, `exclusions.py` malformed/snapshot-conflict edge cases, CLI reporting paths, and rollback/recovery edge branches) and audit all 12 test modules for isolation and Windows/Linux parity.
-8. **`[Hardening]` Syncthing deployment validation**
-   - Harden and systematically test `.stignore` ingestion and multi-device synchronization rules (Windows + Raspberry Pi + VPS + Android).
+Phase 2 runs on `develop` with tested checkpoints. The implementation sequence covers journal and crash recovery, one vault import API and coordinated locking, NFC ambiguity, shared path exclusions and Incoming resolution, bounded archive verification, portable storage names, Markdown context, operational status, and isolated Syncthing integration. See [PROGRESS.md](PROGRESS.md) for executed checks and outstanding platform verification.
 
 ### Phase 3: Ecosystem & Deferred Proposals (Requires Explicit Reopening)
 
@@ -108,4 +81,4 @@ All items below are deferred `[Design proposal]`s and must not be implemented un
 
 - **`[Design proposal]` Obsidian plugin & `madobsidian://<UUID>` URI handler:** Resolve original files on demand from the local archive or remote host.
 - **`[Design proposal]` Cache manager & plugin-owned pinning (`[pin]`):** Retention policy for keeping selected originals on otherwise preview-only devices.
-- **`[Design proposal]` Multi-vault & replacement-file `exclusions.ini` scoping (`exclusions.py`):** Evaluate whether `exclusions.ini` should remain shared per `config.ini` and keyed by basename only (requiring manual removal when replacing a broken file under the same name or sharing a config across vaults), or support vault-scoped / richer exclusion rules in the future.
+- Multi-vault orchestration remains deferred.
