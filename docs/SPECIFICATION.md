@@ -181,7 +181,7 @@ Verified in `src/madobsidian/config.py` and `config.example.ini`.
 - Files are read as `utf-8-sig` with `ConfigParser(interpolation=None, strict=True)`.
 - **Fail-closed validation:** Unknown sections, unknown keys, `DEFAULT` entries, out-of-range numbers, invalid booleans, unsupported formats/codecs, odd video `max_dimension`, and missing/unreadable custom font files fail before processing with `ConfigError` naming the config path, section, and key.
 - **Directory constraints:** `incoming_directory` and `objects_directory` may be relative (resolved from vault root) or absolute, must resolve strictly inside the vault without traversing symlinks, and cannot overlap or nest inside each other (`importer.py:757-758`).
-- **Font path resolution:** Non-`bundled` font paths expand `~`; relative paths resolve from `config_path.parent`, *not* the current working directory. Note (verified in `config.py:172-183`): custom font files are checked for existence and loaded via `ImageFont.truetype` at startup even if `watermark.enabled = false`.
+- **Font path resolution:** Non-`bundled` font paths expand `~`; relative paths resolve from `config_path.parent`, *not* the current working directory. Note (verified in `config.py:172-183`): currently, custom font files are checked for existence and loaded via `ImageFont.truetype` at startup even if `watermark.enabled = false` *(planned for `0.2.2`: skip custom font validation when `watermark.enabled = false` while retaining strict validation when enabled)*.
 
 | Section | Key | Default | Allowed Values / Bounds |
 | --- | --- | --- | --- |
@@ -209,7 +209,7 @@ Verified in `src/madobsidian/config.py` and `config.example.ini`.
 
 - `MADOBSIDIAN_FFMPEG`: Path or `PATH`-resolvable executable name for `ffmpeg` (default: `ffmpeg`).
 - `MADOBSIDIAN_FFPROBE`: Path or `PATH`-resolvable executable name for `ffprobe` (default: `ffprobe`).
-- **Planned for next release (`0.2.2`, not yet implemented):** Optional `ffmpeg` and `ffprobe` executable path settings in `config.ini` (portable `auto` default in `config.example.ini`, relative path resolution from `config_path.parent`, defined precedence with `MADOBSIDIAN_FFMPEG`/`MADOBSIDIAN_FFPROBE` and `PATH`, and wiring through `import`, `verify`, and `rebuild-index`). See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+- **Planned for next release (`0.2.2`, not yet implemented):** Optional `[tools]` section (`ffmpeg = auto`, `ffprobe = auto`) with independent precedence `MADOBSIDIAN_FFMPEG`/`MADOBSIDIAN_FFPROBE` → `[tools]` → `PATH`, lazy `auto` `PATH` discovery, relative paths with path components resolved against `config_path.parent`, absolute paths and `shutil.which()` bare executable names supported, clear failure on explicit invalid values without fallback, and shared resolution across `import`, `verify`, and `rebuild-index`. See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ---
 
@@ -253,7 +253,7 @@ Verified in `src/madobsidian/importer.py` (`import_vault`, `_import_vault_locked
    - For each remaining media candidate, allocates a proposed UUIDv4 and scans all non-symlink `*.md` files in the vault (sorted case-insensitively).
    - Computes active wikilink replacements and records any basename/Unicode ambiguities.
    - Files with zero planned Markdown edits *and* not part of any ambiguity are added to `batch.skipped` (`"no matching Markdown reference"`).
-   - **Verified subtle behavior:** If two candidates in `Incoming/` collide under NFC normalization and trigger an ambiguity on a basename-only link, the link is left unchanged, *yet both candidates are still treated as referenced and imported* (`importer.py:878-882`, verified by `test_vault_import.py:155-179`).
+   - **Verified current behavior (known Phase 2 correctness issue):** If two candidates in `Incoming/` collide under NFC normalization and trigger an ambiguity on a basename-only link, the link is left unchanged, *yet both candidates are still treated as referenced and moved into `objects/`* (`importer.py:878-882`, verified by `test_vault_import.py:155-179`), which can leave links unresolved. Planned Phase 2 correction: leave ambiguous candidates in `Incoming/` as skipped/ambiguous (see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)).
 7. **Dry-run branch:** If `dry_run=True`, appends recovery rows and planned candidate rows to `batch` and returns without modifying the vault, `exclusions.ini`, or `import.log`. (Acquiring `vault_import_lock` may create `.madobsidian-vault-<sha256>.lock` in `vault.parent`.)
 8. **Per-file transactional import (`_import_file` + finalization):**
    - Creates staging directory `objects/.incomplete-<random>` via `tempfile.mkdtemp`.
