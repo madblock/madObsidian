@@ -12,7 +12,7 @@ The stable Phase 1 baseline is `0f9d25b` (`0.2.2`). Phase 2 development and its 
 | Archive health | Unknown entries, pending transactions, transfer artifacts, malformed metadata, missing indexed objects, simulated memory exhaustion and configured scan limits preserve the previous index. |
 | Portability and links | The staging move chooses the portable leaf. Explicit links recover through publication, including when the leaf differs from the original. The lexer covers wiki and inline Markdown forms, aliases, relative targets, code spans, fences, comments and frontmatter. |
 | Status | Read-only diagnostics report local paths, tools, index readability, bounded journal count and exclusions. |
-| Video | Real Windows encode, probe, decode and timeline checks used the source stream's numeric time base. Raspberry Pi FFmpeg 5.1.9 awaits manual validation after integration. |
+| Video | Real Windows encode, probe, decode and timeline checks used the source stream's numeric time base. The first manual Pi run exposed fixture and frame-parsing errors. The corrected suite awaits a manual Pi rerun. |
 | Syncthing | Two isolated Syncthing 2.1.7 processes on loopback synchronized a published journal after importer termination. Recovery on the second peer returned the corrected note and finalized object to the first. A mid-transfer stop left the receiver incomplete. Reconnection restored identical media bytes. Divergent offline exclusions produced a preserved conflict copy. |
 
 ### Process termination coverage
@@ -28,7 +28,7 @@ These tests model abrupt process exit. Physical power failure, POSIX filesystem 
 
 ### Windows verification environment and commands
 
-The final verbose run discovered 171 tests and finished in 321.488 seconds. It passed 170 with zero failures or errors. The single skip requires filenames that Windows cannot create. The branch-wide Git whitespace check passed. Python AST parsing covered all 28 source and test modules, and the documentation check resolved 31 local links across eight engineering documents.
+At `ee0c742`, the verbose run discovered 171 tests and finished in 321.488 seconds. It passed 170 with zero failures or errors. The single skip requires filenames that Windows cannot create. The branch-wide Git whitespace check passed. Python AST parsing covered all 28 source and test modules, and the documentation check resolved 31 local links across eight engineering documents.
 
 Windows, Python 3.11.6, Pillow 13.0.0, FFmpeg and ffprobe from build `N-128915-g3d16b774d7-20261115`, and Syncthing 2.1.7. The project has no configured standalone type checker or linter. The checkout uses the existing virtual environment with the source tree on `PYTHONPATH`.
 
@@ -45,6 +45,31 @@ git diff --check 0f9d25b..develop
 Focused runs used `-m unittest discover -s tests -p <module>.py`. The archive, vault import, exclusions and process-lock modules passed 31, 45, 16 and 3 tests respectively. The crash module passed all four methods, including the 36 subprocess scenarios above. The standalone Syncthing transfer/reconnect test passed with real peers. The portability and diagnostics module passed six tests on Windows and skipped its POSIX-only filesystem case. Some tests inject exceptions, cap scan limits, substitute preview generation, or force the rollback hard-link fallback. Real FFmpeg integration covers CFR, VFR, delayed audio, rotation and threshold behavior.
 
 The removed copy API had 19 dedicated tests in the baseline importer module. Its replacement tests exercise vault metadata, link isolation and UUID collisions. Existing image and video integration fixtures now submit referenced media to the vault importer. Counts across versions therefore represent different test inventories.
+
+### FFmpeg 5.1 compatibility
+
+The first manual Raspberry Pi run on Debian 12, Python 3.11.2 and FFmpeg/FFprobe 5.1.9 reported nine errors and one failure in 171 tests. The following evidence comes from Windows.
+
+- Four configuration tests wrote regular files with no POSIX execute bit. Their positive fixtures now set the owner's execute bit on POSIX. The negative test exercises real file permissions there and simulates a denied execute check on Windows. Explicit paths, independent tool selection and environment/config/PATH precedence retain their existing validation.
+- On the Windows 5.1.2 build, FFprobe JSON contained 20 timestamped video frames for delayed audio and 12 for VFR. Compact output added one blank line after the first frame's H.264 side data in each fixture. The newer Windows build emitted one compact line per frame for the VFR sample. The streaming scanner requests section names, counts each frame, and rejects missing, invalid or non-increasing timestamps. The VFR integration test also compares source timestamps with an independent JSON frame scan. [FFprobe 5.1.9 compact writer](https://github.com/FFmpeg/FFmpeg/blob/n5.1.9/fftools/ffprobe.c#L1120-L1164)
+- On 5.1.2, CFR with audio, silent CFR and exact-threshold imports all recorded the timestamp error and rolled back. Indexing the empty list of successful imports hid that reason. The tests now report batch failures, skips and ignores before checking the preview path.
+- The rotation fixture stream-copies via `-metadata:s:v:0 rotate=90` on 5.1 and uses `-display_rotation` when advertised by newer FFmpeg. It verifies the input's 90-degree display matrix, 640×360 coded dimensions, 226×400 preview and 360×640 watermark text. The application already read the matrix and used FFmpeg autorotation. [FFmpeg 5.1.9 rotation handling](https://github.com/FFmpeg/FFmpeg/blob/n5.1.9/fftools/ffmpeg_opt.c)
+- Once frame scanning succeeded, FFmpeg 5.1.2 exposed millisecond rounding in the MP4 edit list. The delayed fixture's audio began at sample 22,944 (48 kHz). Its preview began at 21,888 with the default movie time scale and at 21,920 with a 48 kHz movie time scale. The latter difference is exactly one 1,024-sample AAC encoder frame, within the existing offset tolerance. Video intervals and audio, video and container durations are checked independently. [FFmpeg 5.1.9 MP4 edit-list timing](https://github.com/FFmpeg/FFmpeg/blob/n5.1.9/libavformat/movenc.c)
+
+Both media tools reported `5.1.2-essentials_build-www.gyan.dev` in the supplemental Windows run. All 12 tests in `test_video_previews.py` passed with this build, exercising the complete preview command including numeric encoder time base, VFR passthrough, delayed AAC, silent video, scale/pad, watermark overlay, MP4 fast-start, rotation and the size boundary. The exact Debian build, ARM codecs and POSIX filesystem behavior require the user's manual rerun on the Pi. [Archived Windows build](https://github.com/GyanD/codexffmpeg/releases/tag/5.1.2)
+
+The upstream 5.1.9 sources document the command's timestamp and frame-rate options, looped image input, framesync overlay options and MP4 movie time scale. Codec availability on the target depends on its build configuration. [5.1.9 CLI](https://github.com/FFmpeg/FFmpeg/blob/n5.1.9/doc/ffmpeg.texi) · [Image input](https://github.com/FFmpeg/FFmpeg/blob/n5.1.9/libavformat/img2dec.c) · [Filter options](https://github.com/FFmpeg/FFmpeg/blob/n5.1.9/doc/filters.texi) · [MP4 muxer](https://github.com/FFmpeg/FFmpeg/blob/n5.1.9/libavformat/movenc.c)
+
+The focused Windows runs used the environment above and passed all 21 configuration tests, 12 video tests and 6 CLI tests. The package metadata, package version and CLI all reported `0.3.0`.
+
+Full Windows discovery after the version bump ran 173 tests in 331.117 seconds with FFmpeg and FFprobe `N-128915-g3d16b774d7-20261115` and the loopback Syncthing test enabled. It passed 172, skipped the POSIX-only filename test, and reported zero failures and zero errors.
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_config.py -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_video_previews.py -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_cli.py -v
+.\.venv\Scripts\python.exe -m madobsidian --version
+```
 
 ## 1. Phase 1 baseline inventory (historical)
 

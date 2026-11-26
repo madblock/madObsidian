@@ -15,14 +15,14 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as exit_info:
             main(["--version"])
         self.assertEqual(exit_info.exception.code, 0)
-        self.assertEqual(output.getvalue().strip(), "madObsidian 0.2.2")
+        self.assertEqual(output.getvalue().strip(), "madObsidian 0.3.0")
 
     def test_status(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = main(["status"])
         self.assertEqual(result, 0)
-        for field in ("madObsidian 0.2.2", "Configuration:", "ffmpeg:", "ffprobe:", "Vault: unspecified"):
+        for field in ("madObsidian 0.3.0", "Configuration:", "ffmpeg:", "ffprobe:", "Vault: unspecified"):
             self.assertIn(field, output.getvalue())
 
     def test_help(self) -> None:

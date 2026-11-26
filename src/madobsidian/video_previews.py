@@ -183,7 +183,7 @@ def _inspect_video(ffprobe: str, path: Path) -> VideoInfo | None:
 def _probe_timeline(ffprobe: str, path: Path, selector: str, time_base: Fraction) -> FrameTimeline:
     command = [
         ffprobe, "-v", "error", "-select_streams", selector, "-show_frames",
-        "-show_entries", "frame=best_effort_timestamp", "-of", "compact=p=0:nk=0", str(path),
+        "-show_entries", "frame=best_effort_timestamp", "-of", "compact=p=1:nk=0", str(path),
     ]
     ticks: list[int] = []
     invalid = 0
@@ -193,12 +193,15 @@ def _probe_timeline(ffprobe: str, path: Path, selector: str, time_base: Fraction
             assert process.stdout is not None
             with process.stdout:
                 for line in process.stdout:
+                    # FFprobe 5.1 can emit an extra newline after nested frame side data.
+                    section, _, fields = line.rstrip("\r\n").partition("|")
+                    if section != "frame":
+                        continue
                     if len(ticks) + invalid >= 1_000_000:
                         process.kill()
                         process.wait()
                         raise VideoPreviewError(f"Frame scan limit reached for {path.name}")
-                    fields = line.strip().split("|")
-                    record = dict(field.split("=", 1) for field in fields if "=" in field)
+                    record = dict(field.split("=", 1) for field in fields.split("|") if "=" in field)
                     value = record.get("best_effort_timestamp")
                     try:
                         ticks.append(int(value))
@@ -212,7 +215,9 @@ def _probe_timeline(ffprobe: str, path: Path, selector: str, time_base: Fraction
     if return_code:
         raise VideoPreviewError(f"ffprobe frame scan failed for {path.name}: {error_text or return_code}")
     if invalid:
-        raise VideoPreviewError(f"ffprobe reported {invalid} frame(s) without valid presentation timestamps")
+        raise VideoPreviewError(
+            f"ffprobe reported {invalid} frame(s) without valid presentation timestamps in {path.name} ({selector})"
+        )
     if not ticks:
         raise VideoPreviewError(f"ffprobe found no decoded frames in {path.name}")
 
@@ -502,6 +507,10 @@ def generate_video_preview(
             ]
             if watermark_settings.enabled:
                 command.extend(["-loop", "1", "-framerate", "1", "-i", str(watermark_path)])
+            if info.audio and info.audio.get("sample_rate"):
+                # MP4 edit-list offsets use movie ticks. Millisecond ticks can round
+                # the AAC priming delay beyond one audio frame on delayed tracks.
+                command.extend(["-movie_timescale", str(info.audio["sample_rate"])])
             command.extend([
                 "-filter_complex", video_filter, "-map", "[vout]", "-map", "0:a:0?",
                 "-fps_mode:v", "passthrough",

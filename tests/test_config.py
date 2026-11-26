@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -29,6 +30,12 @@ from fractions import Fraction
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "config.example.ini"
+
+
+def _write_executable(path: Path) -> None:
+    path.write_bytes(b"#!/bin/sh\nexit 0\n")
+    if os.name == "posix":
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 class ConfigTests(unittest.TestCase):
@@ -218,8 +225,8 @@ class ConfigTests(unittest.TestCase):
             other_dir.mkdir(parents=True)
             rel_ffmpeg = bin_dir / "ffmpeg.exe"
             abs_ffprobe = other_dir / "ffprobe.exe"
-            rel_ffmpeg.write_bytes(b"fake")
-            abs_ffprobe.write_bytes(b"fake")
+            _write_executable(rel_ffmpeg)
+            _write_executable(abs_ffprobe)
             config_path = cfg_dir / "config.ini"
             config_path.write_text(
                 f"[tools]\nffmpeg = bin/ffmpeg.exe\nffprobe = {abs_ffprobe}\n",
@@ -233,10 +240,10 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             # Decoy file inside config directory must NOT be treated as relative path for a bare name.
-            (base / "my-ffmpeg").write_bytes(b"decoy")
+            _write_executable(base / "my-ffmpeg")
             path_tool = base / "on-path" / "my-ffmpeg.exe"
             path_tool.parent.mkdir()
-            path_tool.write_bytes(b"real")
+            _write_executable(path_tool)
             config_path = base / "config.ini"
             config_path.write_text("[tools]\nffmpeg = my-ffmpeg\n", encoding="utf-8")
             with mock.patch("madobsidian.config.shutil.which", return_value=str(path_tool)) as which_mock:
@@ -274,9 +281,10 @@ class ConfigTests(unittest.TestCase):
             tool.write_bytes(b"#!/bin/sh\n")
             config_path = base / "config.ini"
             config_path.write_text("[tools]\nffmpeg = bin/ffmpeg\n", encoding="utf-8")
-            with mock.patch("madobsidian.config._is_posix", return_value=True), mock.patch(
-                "madobsidian.config.os.access", return_value=False
-            ):
+            with contextlib.ExitStack() as stack:
+                if os.name != "posix":
+                    stack.enter_context(mock.patch("madobsidian.config._is_posix", return_value=True))
+                    stack.enter_context(mock.patch("madobsidian.config.os.access", return_value=False))
                 with self.assertRaisesRegex(ConfigError, r"\[tools\] ffmpeg.*not executable"):
                     load_config(config_path)
 
@@ -289,7 +297,7 @@ class ConfigTests(unittest.TestCase):
             path_ffprobe = base / "path" / "ffprobe.exe"
             for p in (env_ffmpeg, cfg_ffmpeg, cfg_ffprobe, path_ffprobe):
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_bytes(b"fake")
+                _write_executable(p)
 
             tools = ToolsConfig(ffmpeg=str(cfg_ffmpeg), ffprobe=str(cfg_ffprobe))
             # 1. Env var overrides [tools] for ffmpeg while ffprobe uses [tools].
@@ -337,8 +345,8 @@ class ConfigTests(unittest.TestCase):
             bin_dir.mkdir()
             custom_ffmpeg = bin_dir / "custom-ffmpeg.exe"
             custom_ffprobe = bin_dir / "custom-ffprobe.exe"
-            custom_ffmpeg.write_bytes(b"fake")
-            custom_ffprobe.write_bytes(b"fake")
+            _write_executable(custom_ffmpeg)
+            _write_executable(custom_ffprobe)
             config_path = base / "config.ini"
             config_path.write_text(
                 "[tools]\nffmpeg = tools/custom-ffmpeg.exe\nffprobe = tools/custom-ffprobe.exe\n",

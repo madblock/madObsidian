@@ -1,6 +1,6 @@
 # madObsidian
 
-madObsidian is a local-first personal media archive and Obsidian vault integration tool (current release: `0.2.2`). It moves referenced media from an Obsidian vault's `Incoming/` directory into SHA-256-verified, UUID-addressed object directories, generates watermarked WebP image previews and full-length H.264/AAC MP4 video previews for large files, and rewrites vault Markdown wikilinks safely with crash recovery.
+madObsidian is a local-first personal media archive and Obsidian vault integration tool (Phase 2 development version `0.3.0`). It moves referenced media from an Obsidian vault's `Incoming/` directory into SHA-256-verified, UUID-addressed object directories, generates watermarked WebP image previews and full-length H.264/AAC MP4 video previews for large files, and rewrites vault Markdown wikilinks safely with crash recovery.
 
 ## Quick Start
 
@@ -38,6 +38,8 @@ Run the test suite with:
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+On POSIX, explicit FFmpeg and FFprobe paths need execute permission, including temporary tools created by configuration tests. The video tests use the configured binaries to generate disposable media, including a rotated MP4 and inputs with irregular frame intervals and delayed audio. Windows test results and the status of the Debian 12 / FFmpeg 5.1.9 rerun are recorded in [Project Progress](docs/PROGRESS.md#ffmpeg-51-compatibility).
 
 ### Key Usage Notes
 

@@ -1,6 +1,6 @@
 # madObsidian Specification
 
-This document is the authoritative technical and functional specification for **madObsidian** (current release: `0.2.2`). It describes both what the current implementation does and what the system is intended to do, explicitly marking discrepancies, unresolved questions, and future scope.
+This document is the authoritative technical and functional specification for **madObsidian** (Phase 2 development version `0.3.0`). It describes both what the current implementation does and what the system is intended to do, explicitly marking discrepancies, unresolved questions, and future scope.
 
 For architectural rationale, see [DECISIONS.md](DECISIONS.md). For current implementation status, known bugs, and technical debt, see [PROGRESS.md](PROGRESS.md). For quality gates, see [ACCEPTANCE_CRITERIA.md](ACCEPTANCE_CRITERIA.md).
 
@@ -38,7 +38,7 @@ All application source lives under `src/madobsidian/` (Python `>= 3.11`, single 
 
 | Module | Responsibility |
 | --- | --- |
-| `__init__.py` | Package version (`__version__ = "0.2.2"`). |
+| `__init__.py` | Package version (`__version__ = "0.3.0"`). |
 | `__main__.py` | Enables `python -m madobsidian`. |
 | `cli.py` | Argument parsing (`argparse`), command dispatch, human-readable stdout/stderr reporting, dry-run unified diffs, exit codes. |
 | `config.py` | Strict INI parsing and validation (`AppConfig`, `ToolsConfig`), built-in `DEFAULT_CONFIG`, explicit executable resolution (`resolve_explicit_executable`), safe vault-bounded directory resolution (`resolve_vault_directory`). |
@@ -223,7 +223,7 @@ Verified in `src/madobsidian/cli.py`.
 | Command | Mode / Behavior | Exit Codes |
 | --- | --- | --- |
 | `madObsidian` (bare) / `--help` | Prints argparse help. | `0` |
-| `madObsidian --version` | Prints `madObsidian 0.2.2`. | `0` |
+| `madObsidian --version` | Prints `madObsidian 0.3.0`. | `0` |
 | `madObsidian status [vault] [--config INI]` | Reports configuration, tools, directories, index readability, pending journals and exclusions. Examines up to 1,000 object entries and 1 MiB of index data. | `0` on successful inspection, `1` for diagnostic errors. |
 
 | `madObsidian import <vault> [--dry-run] [--config INI]` | Vault import mode (`import_vault`). Prints summary (`Imported N file(s); skipped ...; ignored ...; failed ...` for real runs; `Would import N file(s); pending recoveries M; skipped ...; ignored ...; failed ...` for `--dry-run`), `Pending recovery:` lines, per-file planned/imported lines (plus unified diffs in `--dry-run`), `Skipped:`, `Ignored:`, and stderr `Failed:` / `Recovery Error:` lines. | `0` if `failures` is empty; `1` if any file failed or a fatal error occurred. |
@@ -303,9 +303,11 @@ Verified in `src/madobsidian/video_previews.py`:
 - Candidate check (`is_video_candidate`): `size_bytes >= threshold` AND (`video/*` MIME type OR suffix in 24-extension `VIDEO_EXTENSIONS`).
 - Probes streams and frame-by-frame presentation timestamps (`best_effort_timestamp`) via `ffprobe`; rejects videos without a video stream, invalid time base/dimensions, non-increasing PTS, or undeterminable duration. Accounts for rotation metadata (`side_data_list` / `rotate` tag).
 - Scales to fit `videos.max_dimension` (default 400) without enlarging, padding to even canvas dimensions with black.
+- The streaming timeline scan counts named FFprobe frame records. Each decoded frame must supply an integer timestamp in stream ticks. Nested side data and its line separators do not contribute frames or intervals.
 - Encodes via `ffmpeg` with `-copyts -start_at_zero`, `-fps_mode:v passthrough`, `-enc_time_base:v NUM:DEN`, `-c:v libx264 -preset <preset> -bf 0 -crf <crf>`, `-c:a aac -b:a 128k` (first audio stream if present, optional via `0:a:0?`), `-movflags +faststart`, `format=yuv420p`.
 - Watermark (when enabled): rendered to a temporary PNG and composited via `filter_complex` (`overlay=x=0:y=0:eof_action=repeat:shortest=1:repeatlast=1`). Format: `<filename>\n<size> MB | <W>×<H> | <HH:MM:SS.ss>[ | <fps> FPS avg]` (VFR only). Default opacity `155`, margin `6`, font size `max(9, min(14, width // 32))`.
 - **Post-encode verification (`_check_output`):** Re-probes generated MP4 and enforces codec, dimensions, exact frame count, per-frame interval tolerance, video duration tolerance, relative A/V start offset tolerance, audio duration tolerance, and non-zero size before atomic `os.replace` into `previews/preview.mp4`.
+- When the source audio sample rate is available, the MP4 muxer uses that rate as its movie time scale. This gives edit-list start offsets sample precision when encoding delayed AAC at that rate.
 
 ---
 

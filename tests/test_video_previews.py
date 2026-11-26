@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -20,10 +21,34 @@ from madobsidian.archive import scan_archive
 from test_importer import import_fixture
 from madobsidian.video_previews import (
     VIDEO_PREVIEW_THRESHOLD_BYTES,
+    FrameTimeline,
     VideoPreviewError,
     _inspect_video,
     _probe_timeline,
 )
+
+
+class FrameTimelineTests(unittest.TestCase):
+    def _timeline(self, output: str) -> FrameTimeline:
+        process = mock.Mock(stdout=io.StringIO(output))
+        process.wait.return_value = 0
+        with mock.patch("madobsidian.video_previews.subprocess.Popen", return_value=process):
+            return _probe_timeline("ffprobe", Path("fixture.mp4"), "v:0", Fraction(1, 1000))
+
+    def test_side_data_and_blank_line_are_part_of_one_decoded_frame(self) -> None:
+        timeline = self._timeline(
+            "frame|best_effort_timestamp=0|side_data|side_data_type=H.26[45] User Data Unregistered SEI message\n"
+            "\nframe|best_effort_timestamp=100\nframe|best_effort_timestamp=300\n"
+        )
+        self.assertEqual(timeline.frame_count, 3)
+        self.assertEqual(timeline.timestamps, (0, Fraction(1, 10), Fraction(3, 10)))
+        self.assertEqual(timeline.intervals, (Fraction(1, 10), Fraction(1, 5)))
+        self.assertTrue(timeline.variable_frame_rate)
+
+    def test_frame_with_missing_or_invalid_timestamp_still_fails(self) -> None:
+        for frame in ("frame|", "frame|best_effort_timestamp=N/A", "frame|best_effort_timestamp=invalid"):
+            with self.subTest(frame=frame), self.assertRaisesRegex(VideoPreviewError, r"1 frame\(s\).*fixture.mp4"):
+                self._timeline(f"frame|best_effort_timestamp=0\n\n{frame}\nframe|best_effort_timestamp=300\n")
 
 
 class VideoPreviewTests(unittest.TestCase):
@@ -130,8 +155,18 @@ class VideoPreviewTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-2500:])
         return json.loads(result.stdout)
 
+    def _import_one(self, source: Path):
+        batch = import_fixture(source, self.archive)
+        self.assertEqual(
+            len(batch), 1,
+            f"{source.name}: failures={batch.failures}, skipped={batch.skipped}, ignored={batch.ignored}",
+        )
+        return batch[0]
+
     def _object_preview(self, result, name: str = "preview.mp4") -> Path:
-        return self.archive / "objects" / result["id"] / "previews" / name
+        path = self.archive / "objects" / result["id"] / "previews" / name
+        self.assertTrue(path.is_file(), f"Successful import is missing its preview: {path}")
+        return path
 
     def test_cfr_video_with_audio_generates_full_h264_aac_watermarked_preview(self) -> None:
         source = self._make_cfr("Клип-cfr.mp4", audio=True)
@@ -149,7 +184,7 @@ class VideoPreviewTests(unittest.TestCase):
             return original_draw_text(draw, xy, text, *args, **kwargs)
 
         with mock.patch.object(ImageDraw.ImageDraw, "text", capture_text):
-            result = import_fixture(source, self.archive)[0]
+            result = self._import_one(source)
         object_dir = self.archive / "objects" / result["id"]
         preview = self._object_preview(result)
         self.assertTrue(preview.is_file())
@@ -170,7 +205,7 @@ class VideoPreviewTests(unittest.TestCase):
     def test_silent_cfr_video_generates_preview_without_audio(self) -> None:
         source = self._make_cfr("silent.mp4", audio=False)
         self._pad_mp4_to(source, VIDEO_PREVIEW_THRESHOLD_BYTES)
-        result = import_fixture(source, self.archive)[0]
+        result = self._import_one(source)
         streams = self._probe(self._object_preview(result))["streams"]
         self.assertEqual([stream["codec_type"] for stream in streams], ["video"])
 
@@ -180,6 +215,14 @@ class VideoPreviewTests(unittest.TestCase):
         original = _inspect_video(self.ffprobe, source)
         self.assertIsNotNone(original)
         source_timeline = _probe_timeline(self.ffprobe, source, "v:0", original.video_time_base)
+        frames = json.loads(subprocess.check_output([
+            self.ffprobe, "-v", "error", "-select_streams", "v:0", "-show_frames",
+            "-show_entries", "frame=best_effort_timestamp", "-of", "json", str(source),
+        ]))["frames"]
+        self.assertEqual(
+            source_timeline.timestamps,
+            tuple(int(frame["best_effort_timestamp"]) * original.video_time_base for frame in frames),
+        )
         self.assertTrue(source_timeline.variable_frame_rate)
         self.assertGreater(len(set(source_timeline.intervals)), 1)
 
@@ -191,7 +234,7 @@ class VideoPreviewTests(unittest.TestCase):
             return original_draw_text(draw, xy, text, *args, **kwargs)
 
         with mock.patch.object(ImageDraw.ImageDraw, "text", capture_text):
-            result = import_fixture(source, self.archive)[0]
+            result = self._import_one(source)
         output = self._object_preview(result)
         output_info = _inspect_video(self.ffprobe, output)
         output_timeline = _probe_timeline(self.ffprobe, output, "v:0", _probe_fraction(output_info.video["time_base"]))
@@ -217,7 +260,7 @@ class VideoPreviewTests(unittest.TestCase):
         )
         source_offset = source_audio_timeline.timestamps[0] - source_video_timeline.timestamps[0]
 
-        result = import_fixture(source, self.archive)[0]
+        result = self._import_one(source)
         output = self._object_preview(result)
         output_probe = self._probe(output)
         output_video = next(s for s in output_probe["streams"] if s["codec_type"] == "video")
@@ -241,6 +284,10 @@ class VideoPreviewTests(unittest.TestCase):
         source_video_duration = _stream_duration_for_test(source_video)
         output_video_duration = _stream_duration_for_test(output_video)
         self.assertLessEqual(abs(source_video_duration - output_video_duration), Fraction(1, 20))
+        self.assertLessEqual(
+            abs(_stream_duration_for_test(source_audio) - _stream_duration_for_test(output_audio)),
+            Fraction(1, 20),
+        )
         source_container_duration = _probe_fraction(source_probe["format"]["duration"])
         output_container_duration = _probe_fraction(output_probe["format"]["duration"])
         self.assertLessEqual(abs(source_container_duration - output_container_duration), Fraction(1, 20))
@@ -248,14 +295,14 @@ class VideoPreviewTests(unittest.TestCase):
     def test_below_threshold_video_has_no_preview(self) -> None:
         source = self._make_cfr("small.mp4", audio=False)
         self.assertLess(source.stat().st_size, VIDEO_PREVIEW_THRESHOLD_BYTES)
-        result = import_fixture(source, self.archive)[0]
+        result = self._import_one(source)
         self.assertFalse((self.archive / "objects" / result["id"] / "previews").exists())
 
     def test_exact_threshold_video_gets_preview(self) -> None:
         source = self._make_cfr("threshold.mp4", audio=False)
         self._pad_mp4_to(source, VIDEO_PREVIEW_THRESHOLD_BYTES)
         self.assertEqual(source.stat().st_size, 256_000)
-        result = import_fixture(source, self.archive)[0]
+        result = self._import_one(source)
         self.assertTrue(self._object_preview(result).is_file())
         report = scan_archive(self.archive)
         self.assertEqual(report.problems, ())
@@ -290,6 +337,7 @@ class VideoPreviewTests(unittest.TestCase):
         with mock.patch("madobsidian.video_previews.subprocess.run", side_effect=fail_ffmpeg):
             batch = import_fixture(source, self.archive)
             self.assertEqual(len(batch.failures), 1)
+            self.assertIn("simulated FFmpeg failure", batch.failures[0]["reason"])
             self.assertFalse(batch.failures[0]["serious"])
         self.assertEqual(list((self.archive / "objects").iterdir()), [])
 
@@ -297,19 +345,22 @@ class VideoPreviewTests(unittest.TestCase):
         source = self._make_cfr("rotated-video.mp4", audio=True, duration=10)
 
         rotated = self.root / "rotated-video-tagged.mp4"
-        self._run_ffmpeg([
-            "-display_rotation:v:0", "90",
-            "-i", str(source),
-            "-c", "copy",
-            str(rotated),
-        ])
+        help_text = subprocess.check_output([self.ffmpeg, "-hide_banner", "-h", "full"], encoding="utf-8")
+        if "-display_rotation" in help_text:
+            arguments = ["-display_rotation:v:0", "90", "-i", str(source)]
+        else:
+            # FFmpeg 5.1 writes MP4 display matrices through stream metadata on remux.
+            arguments = ["-i", str(source), "-metadata:s:v:0", "rotate=90"]
+        self._run_ffmpeg([*arguments, "-c", "copy", str(rotated)])
 
         source_info = self._probe(rotated)
         video_stream = next(
             stream for stream in source_info["streams"]
             if stream["codec_type"] == "video"
         )
-
+        self.assertEqual((video_stream["width"], video_stream["height"]), (640, 360))
+        rotations = [item.get("rotation") for item in video_stream.get("side_data_list", [])]
+        self.assertIn(90, rotations, f"Fixture has no 90-degree display matrix: {video_stream}")
 
         self.assertGreaterEqual(
             rotated.stat().st_size,
@@ -326,7 +377,7 @@ class VideoPreviewTests(unittest.TestCase):
             return original_draw_text(draw, xy, text, *args, **kwargs)
 
         with mock.patch.object(ImageDraw.ImageDraw, "text", capture_text):
-            result = import_fixture(rotated, self.archive)[0]
+            result = self._import_one(rotated)
 
 
         output = self._object_preview(result)
