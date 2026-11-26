@@ -57,7 +57,7 @@ Obsidian's `.obsidian/app.json` setting `attachmentFolderPath` takes precedence 
 
 Default key settings:
 
-- `[general]`: `incoming_directory = Incoming`, `objects_directory = objects`, `small_file_threshold_bytes = 256000`
+- `[general]`: `incoming_directory = Incoming`, `objects_directory = objects`, `small_file_threshold_bytes = 256000`, `allow_unrelated_syncthing_conflicts = false`
 - `[images]`: `max_dimension = 960`, `format = webp`, `quality = 85`, `method = 6`
 - `[videos]`: `max_dimension = 400` (even), `format = mp4`, `video_codec = libx264`, `video_crf = 25`, `preset = medium`, `audio_codec = aac`
 - `[watermark]`: `enabled = true`, `font = bundled` (DejaVu Sans 2.37; custom fonts are validated only when `enabled = true`), `font_size = auto`, `opacity = auto`, `position = bottom-left`, `margin = auto`
@@ -84,7 +84,7 @@ objects/*/*
 objects/.incomplete-*
 ```
 
-Synchronize `madobsidian_exclusions.ini` at the vault root. The import log and both local lock files live beside the vault. Stop and resolve Syncthing conflict copies before resuming imports. A clean local scan describes files visible on that device. Check Syncthing convergence separately.
+Synchronize `madobsidian_exclusions.ini` at the vault root. The import log and both local lock files live beside the vault. By default, any visible Syncthing conflict copy blocks import and dry-run. Set `allow_unrelated_syncthing_conflicts = true` under `[general]` to proceed with conflicts in unrelated notes, workspaces, or plugin files. Imports leave those copies untouched. Conflicts affecting the resolved Incoming or objects tree, vault index, exclusions, or transaction and recovery files still block. Unfinished transfers outside Incoming still block. A clean local scan describes files visible on that device. Check Syncthing convergence separately.
 
 ## Documentation
 

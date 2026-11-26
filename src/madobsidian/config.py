@@ -15,7 +15,7 @@ from PIL import ImageFont
 _BUNDLED_FONT = Path(__file__).parent / "assets" / "DejaVuSans.ttf"
 _SECTIONS = {"general", "images", "videos", "watermark", "tools"}
 _OPTIONS = {
-    "general": {"incoming_directory", "objects_directory", "small_file_threshold_bytes"},
+    "general": {"incoming_directory", "objects_directory", "small_file_threshold_bytes", "allow_unrelated_syncthing_conflicts"},
     "images": {"max_dimension", "format", "quality", "method"},
     "videos": {"max_dimension", "format", "video_codec", "video_crf", "preset", "audio_codec"},
     "watermark": {"enabled", "font", "font_size", "opacity", "position", "margin"},
@@ -32,6 +32,7 @@ class GeneralConfig:
     incoming_directory: str = "Incoming"
     objects_directory: str = "objects"
     small_file_threshold_bytes: int = 256_000
+    allow_unrelated_syncthing_conflicts: bool = False
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         objects_directory=_directory(parser, config_path, "objects_directory", "objects"),
         small_file_threshold_bytes=_integer(
             parser, config_path, "general", "small_file_threshold_bytes", 256_000, 0, 2**63 - 1
+        ),
+        allow_unrelated_syncthing_conflicts=_boolean(
+            parser, config_path, "general", "allow_unrelated_syncthing_conflicts", False
         ),
     )
     images = ImageConfig(

@@ -14,6 +14,8 @@ For behavioral details, see [SPECIFICATION.md](SPECIFICATION.md). For workflow a
 - **AC-1.4 Strict vault boundary and symlink rejection:** Vault directories, `Incoming/`, `objects/`, source files, `metadata.json`, `transaction.json`, `madobsidian_exclusions.ini`, `index.json`, and journal-referenced paths must reject symlinks and path traversal (`..`, absolute escapes).
 - **AC-1.5 Dry-run purity and result separation:** `--dry-run` must leave the vault, notes, `Incoming/`, `objects/`, `config.ini` and `madobsidian_exclusions.ini` unchanged. A missing Incoming emits a warning to the external `import.log`. Otherwise dry-run leaves the log unchanged. Creating the persistent coordination lock file `.madobsidian-vault-<sha256>.lock` in `vault.parent` is permitted. `ImportBatchResult` must report planned imports in the list (`len(batch)`) and pending recovery operations separately in `batch.recoveries`, and the CLI must report planned imports and pending recoveries separately.
 
+- **AC-1.6 Syncthing conflicts.** Both import modes block on any visible conflict by default. Opting in to unrelated conflicts permits workspace, versioned workspace and ordinary note conflicts. Their contents stay untouched and cannot trigger an import. Conflicts affecting resolved Incoming, configured objects, index, exclusions or recovery artifacts still identify the blocking path before import. Existing unfinished-transfer checks apply in both modes.
+
 ---
 
 ## 2. Candidate Filtering and Markdown Rewriting

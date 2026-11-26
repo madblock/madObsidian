@@ -8,6 +8,7 @@ History prior to the creation of this changelog is reconstructed strictly from G
 
 Development version `0.3.0` on `develop`.
 
+- Add `[general] allow_unrelated_syncthing_conflicts` (default `false`). Import and dry-run can proceed with unrelated Syncthing conflict copies while protecting managed data, preserving conflict notes and retaining transfer checks.
 - Count decoded FFprobe frame records when validating preview timestamps. FFprobe 5.1 can emit a blank line after H.264 frame side data. Frames with missing or invalid timestamps still fail verification.
 - Use audio-sample precision for MP4 edit-list timing to preserve delayed AAC starts within the existing tolerance. Configuration tests create executable fixtures on POSIX, and the rotation test supports the FFmpeg 5.1 stream-copy metadata syntax.
 

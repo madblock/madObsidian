@@ -21,7 +21,7 @@ from madobsidian.config import AppConfig, DEFAULT_CONFIG, resolve_incoming, reso
 from madobsidian.exclusions import ExclusionsError, append_exclusion, exclusion_path, load_exclusions
 from madobsidian.filenames import filename_problem, portable_candidates, storage_name
 from madobsidian.markdown import references
-from madobsidian.synchronization import check_sync_state
+from madobsidian.synchronization import check_sync_state, conflict_copy
 from madobsidian.locking import vault_import_lock
 from madobsidian.previews import REGISTERED_IMAGE_EXTENSIONS, generate_preview
 from madobsidian.video_previews import VIDEO_EXTENSIONS, generate_video_preview, is_video_candidate
@@ -323,7 +323,7 @@ def _markdown_plan(
     preview = "preview.mp4" if video else "preview.webp"
     replacement = f"{objects_directory}/{identifier}/previews/{preview}" if is_large else f"{objects_directory}/{identifier}/shared/{archive_name or Path(filename).name}"
     for note in sorted(vault.rglob("*.md"), key=lambda p: str(p).casefold()):
-        if note.is_symlink():
+        if note.is_symlink() or any(conflict_copy(part) for part in note.relative_to(vault).parts):
             continue
         _safe_relative(vault, note.relative_to(vault).as_posix(), label="Markdown")
         with note.open("r", encoding="utf-8", newline="") as stream:
@@ -508,6 +508,8 @@ def _read_transaction(manifest: Path, vault: Path, object_dir: Path, incoming_di
         raise ImportError("Transaction journal Markdown edits must be an object")
     for note_rel, edits in data["markdown"].items():
         note = _safe_relative(vault, note_rel, label="Markdown")
+        if any(conflict_copy(part) for part in note.relative_to(vault).parts):
+            raise ImportError(f"Transaction journal targets a Syncthing conflict copy: {note}")
         if note.suffix.casefold() != ".md" or not isinstance(edits, list):
             raise ImportError("Transaction journal contains an invalid Markdown entry")
         for edit in edits:
@@ -847,6 +849,33 @@ def _is_uuid_name(value: str) -> bool:
         return False
 
 
+def _managed_conflict(path: Path, root: Path, incoming: Path, objects: Path) -> bool:
+    # Syncthing inserts a dot-delimited conflict marker before the original extension.
+    first, *parts = path.name.split(".")
+    parts = [part for part in parts if not part.casefold().startswith("sync-conflict-")]
+    original_name = ".".join([first, *parts])
+    original = path.parent / original_name
+    for directory in (incoming, objects):
+        if path.is_relative_to(directory) or directory.is_relative_to(path):
+            return True
+        if original_name and directory.is_relative_to(original):
+            return True
+    if original in (root / "index.json", exclusion_path(root)):
+        return True
+    if (original.parent == root and original.suffix == ".tmp"
+            and original.name.startswith((".index-incomplete-", ".exclusions-"))):
+        return True
+    if original.name.casefold().endswith(".md.madobsidian-tmp"):
+        return True
+    # Recovery also recognizes stages and UUID journals from a previous objects_directory.
+    if any(part.startswith(".incomplete-") for part in path.parent.relative_to(root).parts):
+        return True
+    if original.name.startswith(".incomplete-") and (path.is_dir() or original.is_dir()):
+        return True
+    return (original.name in {"transaction.json", "transaction.json.tmp", "metadata.json"}
+            and _is_uuid_name(original.parent.name))
+
+
 def _reject_pending_transactions_outside(vault: Path, objects: Path) -> None:
     """Avoid starting a second import when a prior objects_directory has a pending transaction."""
     configured_objects = objects.resolve()
@@ -892,7 +921,6 @@ def import_vault(vault: str | Path, *, dry_run: bool = False,
         raise ImportError(f"Vault must be a real directory: {root}")
     with vault_import_lock(root.resolve()):
         root = root.resolve()
-        check_sync_state(root, resolve_incoming(root, config or DEFAULT_CONFIG))
         return _import_vault_locked(root, dry_run=dry_run, config=config)
 
 
@@ -906,6 +934,11 @@ def _import_vault_locked(vault: str | Path, *, dry_run: bool = False,
     root = root.resolve()
     incoming = resolve_incoming(root, config)
     objects = resolve_vault_directory(root, config.general.objects_directory)
+    check_sync_state(
+        root, incoming,
+        managed_conflict=(lambda path: _managed_conflict(path, root, incoming, objects))
+        if config.general.allow_unrelated_syncthing_conflicts else None,
+    )
     incoming_relative = incoming.relative_to(root).as_posix()
     objects_relative = objects.relative_to(root).as_posix()
     if incoming == objects or incoming in objects.parents or objects in incoming.parents:

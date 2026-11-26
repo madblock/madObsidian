@@ -181,6 +181,7 @@ Verified in `src/madobsidian/config.py` and `config.example.ini`.
 | `[general]` | `incoming_directory` | `Incoming` | Non-empty path without NUL; inside vault. |
 | `[general]` | `objects_directory` | `objects` | Non-empty path without NUL; inside vault/archive root (cannot be root itself for `archive.py`). |
 | `[general]` | `small_file_threshold_bytes` | `256000` | Integer `0` to `2^63 - 1`. |
+| `[general]` | `allow_unrelated_syncthing_conflicts` | `false` | Boolean. Allows import and dry-run with conflict copies outside managed data. |
 | `[images]` | `max_dimension` | `960` | Integer `1` to `16384`. |
 | `[images]` | `format` | `webp` | `webp` only. |
 | `[images]` | `quality` | `85` | Integer `1` to `100` (lossy WebP; transparent images always use lossless WebP). |
@@ -283,6 +284,14 @@ Verified in `src/madobsidian/importer.py:514-685`:
 ### 8.4 Coordination
 
 The vault lock and exclusion-update lock live in the vault parent, with the latter acquired inside the former during import. Standalone recovery and both archive commands share import's vault lock. Independent devices must serialize imports operationally and wait for synchronization before switching writers.
+
+Normal and dry-run imports scan for Syncthing artifacts before recovery or import work. With the default setting, every visible conflict copy blocks. With `allow_unrelated_syncthing_conflicts = true`, the following conflicts still block:
+
+- The resolved Incoming tree (including an Obsidian `attachmentFolderPath` override) and the configured objects tree, including media, metadata, journals and stages. A conflict copy of a directory on the path to either tree also blocks.
+- The vault-root `index.json` and `madobsidian_exclusions.ini` and their `.index-incomplete-*.tmp` and `.exclusions-*.tmp` write files.
+- Recovery artifacts outside the current objects tree, including `.incomplete-*` staging directories, UUID object metadata and transaction journals, and `*.md.madobsidian-tmp` files beside notes.
+
+Unrelated conflict copies may remain anywhere else, including in `.obsidian` or `.stversions`. A conflict note or a note inside a conflict directory cannot supply an import reference. Recovery refuses a journal that explicitly names such a note. An unfinished Syncthing transfer still blocks outside Incoming, including a transfer of a conflict copy. Ordinary partial transfers inside Incoming retain their existing handling. The option applies only to import and dry-run. Standalone recovery and archive verification retain their existing checks.
 
 ## 9. Media Processing and Preview Generation
 

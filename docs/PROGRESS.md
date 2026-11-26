@@ -15,6 +15,20 @@ The stable Phase 1 baseline is `0f9d25b` (`0.2.2`). Phase 2 development and its 
 | Video | Real Windows encode, probe, decode and timeline checks used the source stream's numeric time base. The first manual Pi run exposed fixture and frame-parsing errors. The corrected suite awaits a manual Pi rerun. |
 | Syncthing | Two isolated Syncthing 2.1.7 processes on loopback synchronized a published journal after importer termination. Recovery on the second peer returned the corrected note and finalized object to the first. A mid-transfer stop left the receiver incomplete. Reconnection restored identical media bytes. Divergent offline exclusions produced a preserved conflict copy. |
 
+### Configurable Syncthing conflicts
+
+Imports and dry-runs default to blocking on every visible conflict copy. With `[general] allow_unrelated_syncthing_conflicts = true`, unrelated workspace, version-history and note conflicts can coexist with an import. Conflict Markdown is excluded from reference planning, including notes beneath a conflict-named directory. The preflight still reports conflicts involving managed files before recovery, and retains the existing unfinished-transfer checks. See the [managed paths in the specification](SPECIFICATION.md#84-coordination).
+
+Focused Windows verification passed 22 configuration tests and 49 vault-import tests. The new cases cover boolean validation, omitted and explicit strict settings, custom archive paths, the Obsidian Incoming override, protected journals and temporary files, conflict-only references, preservation of conflict bytes and modification times, and a pending journal targeting a conflict note. The first focused run also exposed an existing order-dependent assertion in `test_unfiltered_recovery_still_rejects_unrelated_malformed_journal`. Its randomly named valid stage may sort after the malformed stage. The test passed on rerun and during full discovery.
+
+Full Windows discovery with the environment documented below ran 178 tests in 329.131 seconds. It passed 177, including the two-peer loopback Syncthing test, with zero failures and zero errors. The single skip requires POSIX filenames. Linux and Raspberry Pi execution remain unverified for this change.
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_config.py -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_vault_import.py -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
 ### Process termination coverage
 
 The matrix in `tests/test_transaction_crashes.py` uses `os._exit(83)`. It covers 36 scenarios, including repeated boundaries for portable names. Each case inspects media, notes or the index and runs recovery in fresh processes.

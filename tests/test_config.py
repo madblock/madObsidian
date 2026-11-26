@@ -42,6 +42,7 @@ class ConfigTests(unittest.TestCase):
     def test_example_configuration_loads(self) -> None:
         config = load_config(EXAMPLE)
         self.assertEqual(config.general.small_file_threshold_bytes, 256_000)
+        self.assertFalse(config.general.allow_unrelated_syncthing_conflicts)
         self.assertEqual(config.images.max_dimension, 960)
         self.assertEqual(config.videos.video_codec, "libx264")
         self.assertTrue(config.watermark.enabled)
@@ -53,6 +54,7 @@ class ConfigTests(unittest.TestCase):
     def test_missing_config_uses_backward_compatible_defaults(self) -> None:
         self.assertIs(load_config(), DEFAULT_CONFIG)
         self.assertEqual(load_config().general.incoming_directory, "Incoming")
+        self.assertFalse(load_config().general.allow_unrelated_syncthing_conflicts)
         self.assertEqual(load_config().watermark.font_path.name, "DejaVuSans.ttf")
         self.assertEqual(load_config().tools, ToolsConfig(ffmpeg="auto", ffprobe="auto"))
 
@@ -65,6 +67,16 @@ class ConfigTests(unittest.TestCase):
             return load_config(path), None
         except Exception as error:  # exercise errors as public configuration behavior
             return None, error
+
+    def test_unrelated_syncthing_conflicts_uses_general_boolean_validation(self) -> None:
+        for value, expected in (("on", True), ("no", False)):
+            with self.subTest(value=value):
+                config, error = self._load_text(f"[general]\nallow_unrelated_syncthing_conflicts = {value}\n")
+                self.assertIsNone(error)
+                self.assertIs(config.general.allow_unrelated_syncthing_conflicts, expected)
+        _, error = self._load_text("[general]\nallow_unrelated_syncthing_conflicts = sometimes\n")
+        self.assertIsInstance(error, ConfigError)
+        self.assertIn("[general] allow_unrelated_syncthing_conflicts", str(error))
 
     def test_valid_custom_values_and_relative_font_path(self) -> None:
         root = Path(__file__).resolve().parents[1]

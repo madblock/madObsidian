@@ -82,6 +82,90 @@ class VaultImportTests(unittest.TestCase):
         self.assertIn("note.md", rows[0]["changes"])
         self.assertFalse((self.vault / "objects").exists())
 
+    def _sync_config(self, settings):
+        path = self.vault.parent / "test-config.ini"
+        path.write_text("[general]\n" + settings, encoding="utf-8")
+        return load_config(path)
+
+    def test_unrelated_conflict_blocks_by_default_and_when_explicitly_disabled(self):
+        conflict = self.vault / ".obsidian" / "workspace.sync-conflict-20260101-120000-DEVICE.json"
+        conflict.parent.mkdir()
+        conflict.write_bytes(b"workspace copy")
+        for settings in ("", "allow_unrelated_syncthing_conflicts = false"):
+            for dry_run in (True, False):
+                with self.subTest(settings=settings, dry_run=dry_run), self.assertRaises(OSError) as blocked:
+                    import_vault(self.vault, dry_run=dry_run, config=self._sync_config(settings))
+                self.assertIn(str(conflict.resolve()), str(blocked.exception))
+                self.assertEqual(conflict.read_bytes(), b"workspace copy")
+
+    def test_opt_in_imports_with_unrelated_conflicts_and_preserves_conflict_notes(self):
+        config = self._sync_config("allow_unrelated_syncthing_conflicts = true")
+        for name in ("active.jpg", "conflict-only.jpg"):
+            (self.vault / "Incoming" / name).write_bytes(b"small")
+        note = self.vault / "active.md"
+        note.write_text("[[Incoming/active.jpg]]", encoding="utf-8")
+        snapshots = {}
+        for relative in (
+            ".obsidian/workspace.sync-conflict-peer.json",
+            ".stversions/.obsidian/workspace.sync-conflict-peer.json",
+            "Folder/note.sync-conflict-peer.md", "Folder.sync-conflict-peer/nested.md",
+            "Folder/index.sync-conflict-peer.json", "attachment.sync-conflict-peer.jpg",
+        ):
+            path = self.vault / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = b"[[Incoming/active.jpg]]\r\n[[Incoming/conflict-only.jpg]]\r\n"
+            path.write_bytes(content)
+            snapshots[path] = (content, path.stat().st_mtime_ns)
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                rows = import_vault(self.vault, dry_run=dry_run, config=config)
+                self.assertEqual(len(rows), 1, rows.failures)
+                if dry_run:
+                    self.assertEqual(set(rows[0]["changes"]), {"active.md"})
+                    self.assertEqual(note.read_text(), "[[Incoming/active.jpg]]")
+                else:
+                    self.assertIn(rows[0]["target"], note.read_text())
+                self.assertTrue((self.vault / "Incoming" / "conflict-only.jpg").exists())
+                for path, expected in snapshots.items():
+                    self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), expected, path)
+
+    def test_opt_in_blocks_managed_conflicts_and_unfinished_transfers_before_import(self):
+        config = self._sync_config(
+            "incoming_directory = Unused\nobjects_directory = Storage/Media\nallow_unrelated_syncthing_conflicts = true"
+        )
+        (self.vault / ".obsidian").mkdir()
+        (self.vault / ".obsidian" / "app.json").write_text('{"attachmentFolderPath":"Drop/New"}')
+        incoming = self.vault / "Drop" / "New"
+        incoming.mkdir(parents=True)
+        source = incoming / "active.jpg"
+        source.write_bytes(b"small")
+        note = self.vault / "note.md"
+        note.write_bytes(b"[[Drop/New/active.jpg]]")
+        obj = "Storage/Media/00000000-0000-4000-8000-000000000001"
+        for relative in (
+            "Drop/New/sub/photo.sync-conflict-peer.jpg", "Drop/New.sync-conflict-peer",
+            "Storage/Media.sync-conflict-peer", f"{obj}/originals/photo.sync-conflict-peer.jpg",
+            f"{obj}/metadata.sync-conflict-peer.json", f"{obj}/transaction.sync-conflict-peer.json",
+            "Storage/Media/.incomplete-stage/transaction.json.sync-conflict-peer.tmp",
+            "index.sync-conflict-peer.json", "madobsidian_exclusions.sync-conflict-peer.ini",
+            ".index-incomplete-abc.sync-conflict-peer.tmp", ".exclusions-abc.sync-conflict-peer.tmp",
+            "Folder/note.md.sync-conflict-peer.madobsidian-tmp",
+            "Old/00000000-0000-4000-8000-000000000001/transaction.sync-conflict-peer.json",
+            ".obsidian/.syncthing.workspace.json.tmp", "Folder/~syncthing~note.md.tmp",
+            "Folder/.syncthing.note.sync-conflict-peer.md.tmp",
+        ):
+            conflict = self.vault / relative
+            conflict.parent.mkdir(parents=True, exist_ok=True)
+            conflict.write_bytes(b"preserve")
+            for dry_run in (True, False):
+                with self.subTest(relative=relative, dry_run=dry_run), self.assertRaises(OSError) as blocked:
+                    import_vault(self.vault, dry_run=dry_run, config=config)
+                self.assertIn(str(conflict.resolve()), str(blocked.exception))
+                self.assertEqual(conflict.read_bytes(), b"preserve")
+                self.assertEqual(source.read_bytes(), b"small")
+                self.assertEqual(note.read_bytes(), b"[[Drop/New/active.jpg]]")
+            conflict.unlink()
+
     def test_referenced_supported_image_and_video_are_imported(self):
         image = self.vault / "Incoming" / "picture.JPG"
         video = self.vault / "Incoming" / "clip.MP4"
@@ -350,6 +434,22 @@ class VaultImportTests(unittest.TestCase):
         self.assertEqual(len(list((self.vault / "objects").glob("*/shared/pending.jpg"))), 1)
         self.assertFalse((self.vault / "archive-v2").exists())
         self.assertEqual(len(list((self.vault / "objects").glob("*/transaction.json"))), 1)
+
+    def test_opt_in_recovery_refuses_journal_that_targets_a_conflict_note(self):
+        self._leave_pending_import()
+        journal, = (self.vault / "objects").glob("*/transaction.json")
+        data = json.loads(journal.read_bytes())
+        conflict = self.vault / "note.sync-conflict-peer.md"
+        conflict.write_bytes((self.vault / "note.md").read_bytes())
+        original = conflict.read_bytes()
+        data["markdown"][conflict.name] = data["markdown"].pop("note.md")
+        journal.write_text(json.dumps(data), encoding="utf-8")
+        config = self._sync_config("allow_unrelated_syncthing_conflicts = true")
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run), self.assertRaisesRegex(importer.ImportError, "targets a Syncthing conflict copy"):
+                import_vault(self.vault, dry_run=dry_run, config=config)
+            self.assertEqual(conflict.read_bytes(), original)
+            self.assertEqual(json.loads(journal.read_bytes()), data)
 
     def test_changed_threshold_refuses_unsafe_pending_recovery(self):
         source = self._leave_pending_import()
